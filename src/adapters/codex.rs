@@ -1,0 +1,331 @@
+use std::{
+    collections::BTreeMap,
+    io::{BufRead, BufReader, Read, Write},
+    process::{Child, Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+use serde::Deserialize;
+use wait_timeout::ChildExt;
+
+use crate::{
+    adapter::{AdapterError, PlanAdapter},
+    domain::{CodingPlan, PlanIdentity, UsageStatus, UsageWindow},
+};
+
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const INITIALIZE_MESSAGE: &str = concat!(
+    r#"{"method":"initialize","id":1,"params":{"clientInfo":{"name":"limitdeck","title":"LimitDeck","version":""#,
+    env!("CARGO_PKG_VERSION"),
+    r#""}}}"#
+);
+
+pub struct CodexAppServerAdapter;
+
+impl CodexAppServerAdapter {
+    pub fn discover() -> Option<Self> {
+        command_succeeds("codex", &["--version"], DISCOVERY_TIMEOUT).then_some(Self)
+    }
+}
+
+impl PlanAdapter for CodexAppServerAdapter {
+    fn identity(&self) -> PlanIdentity {
+        PlanIdentity::new("openai-codex", "openai", "Codex")
+    }
+
+    fn fetch(&self) -> Result<CodingPlan, AdapterError> {
+        fetch_from_app_server()
+    }
+}
+
+fn fetch_from_app_server() -> Result<CodingPlan, AdapterError> {
+    let mut child = Command::new("codex")
+        .args(["app-server", "--listen", "stdio://"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| AdapterError)?;
+    let Some(mut stdin) = child.stdin.take() else {
+        stop_child(&mut child);
+        return Err(AdapterError);
+    };
+    let Some(stdout) = child.stdout.take() else {
+        stop_child(&mut child);
+        return Err(AdapterError);
+    };
+    let (messages, receiver) = mpsc::sync_channel(4);
+    let reader = thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            match read_bounded_line(&mut reader) {
+                Ok(Some(line)) => {
+                    if messages.send(Ok(line)).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = messages.send(Err(error));
+                    break;
+                }
+            }
+        }
+    });
+
+    let result = (|| {
+        write_message(&mut stdin, INITIALIZE_MESSAGE)?;
+
+        let started = Instant::now();
+        loop {
+            let remaining = REQUEST_TIMEOUT
+                .checked_sub(started.elapsed())
+                .ok_or(AdapterError)?;
+            let line = receiver
+                .recv_timeout(remaining)
+                .map_err(|_| AdapterError)??;
+            let response: ResponseId = serde_json::from_str(&line).map_err(|_| AdapterError)?;
+            match response.id {
+                Some(1) => {
+                    write_message(&mut stdin, r#"{"method":"initialized","params":{}}"#)?;
+                    write_message(&mut stdin, r#"{"method":"account/rateLimits/read","id":2}"#)?;
+                }
+                Some(2) => {
+                    break parse_rate_limit_response(line.as_bytes(), SystemTime::now());
+                }
+                _ => {}
+            }
+        }
+    })();
+
+    drop(stdin);
+    drop(receiver);
+    stop_child(&mut child);
+    let _ = reader.join();
+    result
+}
+fn read_bounded_line(reader: &mut impl BufRead) -> Result<Option<String>, AdapterError> {
+    let mut bytes = Vec::new();
+    let read = reader
+        .take((MAX_MESSAGE_BYTES + 1) as u64)
+        .read_until(b'\n', &mut bytes)
+        .map_err(|_| AdapterError)?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if bytes.len() > MAX_MESSAGE_BYTES {
+        return Err(AdapterError);
+    }
+    String::from_utf8(bytes).map(Some).map_err(|_| AdapterError)
+}
+
+fn write_message(stdin: &mut impl Write, message: &str) -> Result<(), AdapterError> {
+    stdin
+        .write_all(message.as_bytes())
+        .map_err(|_| AdapterError)?;
+    stdin.write_all(b"\n").map_err(|_| AdapterError)?;
+    stdin.flush().map_err(|_| AdapterError)
+}
+
+fn stop_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn command_succeeds(program: &str, args: &[&str], timeout: Duration) -> bool {
+    let Ok(mut child) = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    match child.wait_timeout(timeout) {
+        Ok(Some(status)) => status.success(),
+        Ok(None) | Err(_) => {
+            stop_child(&mut child);
+            false
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ResponseId {
+    id: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct RateLimitRpcResponse {
+    id: u64,
+    result: Option<RateLimitResponse>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RateLimitResponse {
+    rate_limits: RateLimitSnapshot,
+    rate_limits_by_limit_id: Option<BTreeMap<String, RateLimitSnapshot>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RateLimitSnapshot {
+    limit_name: Option<String>,
+    primary: Option<SourceWindow>,
+    secondary: Option<SourceWindow>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceWindow {
+    used_percent: i32,
+    window_duration_mins: Option<u64>,
+    resets_at: Option<i64>,
+}
+
+fn parse_rate_limit_response(
+    input: &[u8],
+    fetched_at: SystemTime,
+) -> Result<CodingPlan, AdapterError> {
+    let response: RateLimitRpcResponse = serde_json::from_slice(input).map_err(|_| AdapterError)?;
+    if response.id != 2 {
+        return Err(AdapterError);
+    }
+    let response = response.result.ok_or(AdapterError)?;
+    let mut windows = Vec::new();
+    let buckets = response
+        .rate_limits_by_limit_id
+        .filter(|buckets| !buckets.is_empty())
+        .unwrap_or_else(|| BTreeMap::from([("codex".to_owned(), response.rate_limits)]));
+
+    for (bucket_id, snapshot) in buckets {
+        let label = snapshot.limit_name.unwrap_or_else(|| {
+            if bucket_id == "codex" {
+                "Codex".to_owned()
+            } else {
+                bucket_id.clone()
+            }
+        });
+        push_window(
+            &mut windows,
+            &bucket_id,
+            &label,
+            "primary",
+            snapshot.primary,
+        );
+        push_window(
+            &mut windows,
+            &bucket_id,
+            &label,
+            "secondary",
+            snapshot.secondary,
+        );
+    }
+    if windows.is_empty() {
+        return Err(AdapterError);
+    }
+
+    Ok(CodingPlan {
+        id: "openai-codex".to_owned(),
+        provider_id: "openai".to_owned(),
+        display_name: "Codex".to_owned(),
+        fetched_at,
+        windows,
+    })
+}
+
+fn push_window(
+    windows: &mut Vec<UsageWindow>,
+    bucket_id: &str,
+    label: &str,
+    position: &str,
+    source: Option<SourceWindow>,
+) {
+    let Some(source) = source else {
+        return;
+    };
+    let period = source
+        .window_duration_mins
+        .and_then(|minutes| minutes.checked_mul(60))
+        .map(Duration::from_secs);
+    let resets_at = source
+        .resets_at
+        .and_then(|seconds| u64::try_from(seconds).ok())
+        .and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds)));
+    let used = source.used_percent.clamp(0, 100) as u8;
+    windows.push(UsageWindow {
+        id: format!("openai:{bucket_id}:{position}"),
+        label: format!("{label} · {}", period_label(period)),
+        period,
+        remaining_percent: 100 - used,
+        resets_at,
+        status: UsageStatus::Available,
+    });
+}
+
+fn period_label(period: Option<Duration>) -> String {
+    let Some(period) = period else {
+        return "额度".to_owned();
+    };
+    let hours = period.as_secs() / 3600;
+    if hours >= 24 && hours % 24 == 0 {
+        format!("{} 天", hours / 24)
+    } else {
+        format!("{hours} 小时")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RESPONSE: &[u8] = br#"{
+        "id":2,
+        "result":{
+            "account":{"email":"private@example.com","id":"secret-account"},
+            "rateLimits":{"planType":"plus","primary":{"usedPercent":35,"windowDurationMins":10080,"resetsAt":2000000000}},
+            "rateLimitsByLimitId":{
+                "codex":{"planType":"plus","primary":{"usedPercent":35,"windowDurationMins":10080,"resetsAt":2000000000}},
+                "codex_spark":{"limitName":"Codex Spark","primary":{"usedPercent":20,"windowDurationMins":300,"resetsAt":2000100000},"secondary":{"usedPercent":55,"windowDurationMins":10080,"resetsAt":2000200000}}
+            }
+        }
+    }"#;
+
+    #[test]
+    fn parses_official_rate_limits_without_identity_or_plan_metadata() {
+        let plan = parse_rate_limit_response(RESPONSE, UNIX_EPOCH + Duration::from_secs(10))
+            .expect("official response should parse");
+
+        assert_eq!(plan.windows.len(), 3);
+        assert_eq!(plan.windows[0].remaining_percent, 65);
+        assert_eq!(plan.windows[1].period, Some(Duration::from_secs(300 * 60)));
+        assert_eq!(plan.windows[2].remaining_percent, 45);
+        let retained = format!("{plan:?}");
+        for forbidden in ["private@example.com", "secret-account", "plus"] {
+            assert!(!retained.contains(forbidden));
+        }
+    }
+    #[test]
+    fn rejects_an_oversized_app_server_message() {
+        let input = vec![b'x'; MAX_MESSAGE_BYTES + 1];
+        let mut reader = BufReader::new(input.as_slice());
+
+        assert_eq!(read_bounded_line(&mut reader), Err(AdapterError));
+    }
+
+    #[test]
+    fn falls_back_to_the_legacy_single_bucket() {
+        let response = br#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300,"resetsAt":null}},"rateLimitsByLimitId":null}}"#;
+        let plan = parse_rate_limit_response(response, SystemTime::now())
+            .expect("legacy response should remain supported");
+
+        assert_eq!(plan.windows.len(), 1);
+        assert_eq!(plan.windows[0].remaining_percent, 90);
+    }
+}

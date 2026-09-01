@@ -1,0 +1,46 @@
+{
+  "metadata": {
+    "email": "private@example.com",
+    "accountId": "acct-secret",
+    "orgId": "org-secret",
+    "orgName": "Private Organization",
+    "plan": "secret-plan"
+  },
+  "reports": [
+    {
+      "fetchedAt": 1788279208500,
+      "accountId": "acct-secret",
+      "metadata": {
+        "planType": "Plus",
+        "email": "private@example.com",
+        "accountId": "acct-secret",
+        "orgId": "org-secret",
+        "orgName": "Private Organization"
+      },
+      "limits": [
+        {
+          "id": "openai-codex:primary",
+          "label": "普通 Codex · 7 天",
+          "window": { "resetsAt": 1788753194000 },
+          "amount": { "remaining": 76 },
+          "status": "ok",
+          "orgName": "Private Organization"
+        },
+        {
+          "id": "openai-codex:spark:primary",
+          "label": "Spark · 5 小时",
+          "window": { "resetsAt": 1788297209000 },
+          "amount": { "remaining": 100 },
+          "status": "ok"
+        },
+        {
+          "id": "openai-codex:spark:secondary",
+          "label": "Spark · 7 天",
+          "window": { "resetsAt": 1788884009000 },
+          "amount": { "remaining": 100 },
+          "status": "ok"
+        }
+      ]
+    }
+  ]
+}
