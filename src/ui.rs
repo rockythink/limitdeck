@@ -57,33 +57,31 @@ fn render_plan_list(frame: &mut Frame<'_>, area: Rect, app: &App, palette: Palet
         return;
     }
 
-    let visible = usize::from(area.height).min(app.plans().len());
-    let start = app
-        .selected_index()
-        .saturating_add(1)
-        .saturating_sub(visible);
-    for (screen_row, (index, plan)) in app
-        .plans()
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(visible)
-        .enumerate()
-    {
+    let viewport_height = usize::from(area.height);
+    let start = viewport_start(app, area.width, viewport_height);
+    let mut screen_row = 0usize;
+
+    for (index, plan) in app.plans().iter().enumerate().skip(start) {
         let selected = index == app.selected_index();
         let background = if selected {
             palette.surface
         } else {
             palette.background
         };
-        let spans = plan_row(plan, area.width, selected, palette);
-        render_line(frame, row(area, screen_row as u16), spans, background);
+        let rows = plan_rows(plan, area.width, viewport_height, selected, palette);
+        if screen_row + rows.len() > viewport_height {
+            break;
+        }
+        for spans in rows {
+            render_line(frame, row(area, screen_row as u16), spans, background);
+            screen_row += 1;
+        }
     }
 
-    if usize::from(area.height) > visible {
+    if screen_row < viewport_height {
         render_line(
             frame,
-            row(area, visible as u16),
+            row(area, screen_row as u16),
             vec![Span::styled(
                 "  ↑↓/jk 选择 · Enter 详情 · r 刷新 · q 退出",
                 Style::default().fg(palette.muted),
@@ -91,6 +89,105 @@ fn render_plan_list(frame: &mut Frame<'_>, area: Rect, app: &App, palette: Palet
             palette.background,
         );
     }
+}
+
+fn viewport_start(app: &App, width: u16, viewport_height: usize) -> usize {
+    let selected = app.selected_index();
+    let mut start = 0usize;
+    let mut occupied = app.plans()[..=selected]
+        .iter()
+        .map(|plan| plan_height(plan, width, viewport_height))
+        .sum::<usize>();
+
+    while occupied > viewport_height && start < selected {
+        occupied =
+            occupied.saturating_sub(plan_height(&app.plans()[start], width, viewport_height));
+        start += 1;
+    }
+    start
+}
+
+fn plan_height(state: &PlanState, width: u16, viewport_height: usize) -> usize {
+    if uses_stacked_rows(state, width, viewport_height) {
+        state.plan.as_ref().map_or(1, |plan| plan.windows.len())
+    } else {
+        1
+    }
+}
+
+fn uses_stacked_rows(state: &PlanState, width: u16, viewport_height: usize) -> bool {
+    let Some(plan) = &state.plan else {
+        return false;
+    };
+    width >= 40 && plan.windows.len() > 2 && plan.windows.len() <= viewport_height
+}
+
+fn plan_rows(
+    state: &PlanState,
+    width: u16,
+    viewport_height: usize,
+    selected: bool,
+    palette: Palette,
+) -> Vec<Vec<Span<'static>>> {
+    if uses_stacked_rows(state, width, viewport_height) {
+        return stacked_plan_rows(state, width, selected, palette);
+    }
+    vec![plan_row(state, width, selected, palette)]
+}
+
+fn stacked_plan_rows(
+    state: &PlanState,
+    width: u16,
+    selected: bool,
+    palette: Palette,
+) -> Vec<Vec<Span<'static>>> {
+    let accent = provider_accent(&state.identity.provider_id, palette);
+    let name_width = 9usize;
+    let prefix_width = 2 + name_width;
+    let bar_width = usize::from(width)
+        .saturating_sub(prefix_width + 11)
+        .clamp(6, 24);
+    let plan = state.plan.as_ref().expect("stacked rows require a plan");
+
+    plan.windows
+        .iter()
+        .enumerate()
+        .map(|(index, window)| {
+            let mut spans = if index == 0 {
+                vec![
+                    Span::styled(
+                        if selected { "› " } else { "  " },
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        fit_name(&state.identity.display_name, name_width),
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ),
+                ]
+            } else {
+                vec![Span::raw(" ".repeat(prefix_width))]
+            };
+            let period = period_label(window.period);
+            spans.push(Span::styled(
+                if window.period.is_some() {
+                    format!(" {period:>4} ")
+                } else {
+                    " 配额 ".to_owned()
+                },
+                Style::default().fg(palette.muted),
+            ));
+            push_bar(&mut spans, window, bar_width, accent, palette);
+
+            let phase = phase_text(state.phase);
+            if index == 0 && !phase.is_empty() && width >= 64 {
+                spans.push(Span::styled(
+                    format!(" {phase}"),
+                    Style::default().fg(palette.muted),
+                ));
+            }
+            spans
+        })
+        .collect()
 }
 
 fn plan_row(state: &PlanState, width: u16, selected: bool, palette: Palette) -> Vec<Span<'static>> {
@@ -113,7 +210,8 @@ fn plan_row(state: &PlanState, width: u16, selected: bool, palette: Palette) -> 
         return spans;
     };
 
-    if width < 32 || !room_for_bars(width, name_width, plan.windows.len()) {
+    if plan.windows.len() > 2 || width < 32 || !room_for_bars(width, name_width, plan.windows.len())
+    {
         for (index, window) in plan.windows.iter().enumerate() {
             if index > 0 {
                 spans.push(Span::styled("/", Style::default().fg(palette.muted)));
@@ -130,19 +228,7 @@ fn plan_row(state: &PlanState, width: u16, selected: bool, palette: Palette) -> 
                 format!(" {} ", period_label(window.period)),
                 Style::default().fg(palette.muted),
             ));
-            let filled = usize::from(window.remaining_percent) * bar_width / 100;
-            spans.push(Span::styled(
-                "█".repeat(filled),
-                Style::default().fg(accent),
-            ));
-            spans.push(Span::styled(
-                "░".repeat(bar_width - filled),
-                Style::default().fg(palette.border),
-            ));
-            spans.push(Span::styled(
-                format!(" {:>3}%", window.remaining_percent),
-                Style::default().fg(percent_color(window, palette)),
-            ));
+            push_bar(&mut spans, window, bar_width, accent, palette);
         }
     }
 
@@ -154,6 +240,28 @@ fn plan_row(state: &PlanState, width: u16, selected: bool, palette: Palette) -> 
         ));
     }
     spans
+}
+
+fn push_bar(
+    spans: &mut Vec<Span<'static>>,
+    window: &UsageWindow,
+    bar_width: usize,
+    accent: Color,
+    palette: Palette,
+) {
+    let filled = usize::from(window.remaining_percent) * bar_width / 100;
+    spans.push(Span::styled(
+        "█".repeat(filled),
+        Style::default().fg(accent),
+    ));
+    spans.push(Span::styled(
+        "░".repeat(bar_width - filled),
+        Style::default().fg(palette.border),
+    ));
+    spans.push(Span::styled(
+        format!(" {:>3}%", window.remaining_percent),
+        Style::default().fg(percent_color(window, palette)),
+    ));
 }
 
 fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &App, palette: Palette) {
@@ -404,19 +512,23 @@ mod tests {
         }
     }
 
-    fn populated_app() -> App {
+    fn app_with_codex_windows(values: &[u8]) -> App {
         let codex = PlanIdentity::new("codex", "openai", "Codex");
         let claude = PlanIdentity::new("claude", "anthropic", "Claude");
         let mut app = App::new([codex.clone(), claude.clone()]);
         app.apply_event(PlanEvent::Fetched {
             identity: codex,
-            result: Ok(plan("codex", "openai", "Codex", &[71, 52])),
+            result: Ok(plan("codex", "openai", "Codex", values)),
         });
         app.apply_event(PlanEvent::Fetched {
             identity: claude,
             result: Ok(plan("claude", "anthropic", "Claude", &[63, 82])),
         });
         app
+    }
+
+    fn populated_app() -> App {
+        app_with_codex_windows(&[71, 52])
     }
 
     fn draw(app: &App, width: u16, height: u16) -> TestBackend {
@@ -441,11 +553,49 @@ mod tests {
 
     #[test]
     fn narrow_layout_keeps_every_plan_and_percentage() {
-        let backend = draw(&populated_app(), 24, 2);
+        let backend = draw(&app_with_codex_windows(&[71, 52, 33]), 24, 2);
         assert!(text(&backend, 0).contains("Codex"));
-        assert!(text(&backend, 0).contains("71%/52%"));
+        assert!(text(&backend, 0).contains("71%/52%/33%"));
         assert!(text(&backend, 1).contains("Claude"));
         assert!(text(&backend, 1).contains("63%/82%"));
+    }
+
+    #[test]
+    fn three_windows_use_one_readable_bar_per_row() {
+        let backend = draw(&app_with_codex_windows(&[71, 52, 33]), 60, 4);
+        let first = text(&backend, 0);
+        let second = text(&backend, 1);
+        let third = text(&backend, 2);
+
+        assert!(
+            first.contains("Codex") && first.contains("71%"),
+            "{first:?}"
+        );
+        assert!(second.contains("52%"), "{second:?}");
+        assert!(third.contains("33%"), "{third:?}");
+        assert!(!first.contains("52%"));
+        assert!(!second.contains("33%"));
+        for row in [first, second, third] {
+            assert!(row.contains('█') && row.contains('░'), "{row:?}");
+        }
+        assert!(text(&backend, 3).contains("Claude"));
+    }
+
+    #[test]
+    fn short_viewport_keeps_three_windows_compact_and_complete() {
+        let backend = draw(&app_with_codex_windows(&[71, 52, 33]), 60, 2);
+        assert!(text(&backend, 0).contains("71%/52%/33%"));
+        assert!(text(&backend, 1).contains("Claude"));
+    }
+
+    #[test]
+    fn selection_scrolls_past_a_stacked_plan_as_one_card() {
+        let mut app = app_with_codex_windows(&[71, 52, 33]);
+        app.select_next();
+
+        let backend = draw(&app, 60, 3);
+        assert!(text(&backend, 0).contains("Claude"));
+        assert_eq!(backend.buffer().cell((0, 0)).unwrap().symbol(), "›");
     }
     #[test]
     fn selected_plan_stays_visible_when_the_list_scrolls() {
