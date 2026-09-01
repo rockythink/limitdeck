@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::{
     io::Read,
     process::{Command, Stdio},
@@ -43,13 +45,16 @@ impl PlanAdapter for OmpCodexAdapter {
 }
 
 fn run_command(program: &str, args: &[&str], timeout: Duration) -> Result<Vec<u8>, AdapterError> {
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| AdapterError)?;
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let mut child = command.spawn().map_err(|_| AdapterError)?;
     let Some(stdout) = child.stdout.take() else {
         stop_child(&mut child);
         return Err(AdapterError);
@@ -79,6 +84,11 @@ fn run_command(program: &str, args: &[&str], timeout: Duration) -> Result<Vec<u8
     Ok(output)
 }
 fn stop_child(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Ok(process_group) = i32::try_from(child.id()) {
+        // SAFETY: a negative PID asks kill(2) to signal the child's process group.
+        let _ = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+    }
     let _ = child.kill();
     let _ = child.wait();
 }
