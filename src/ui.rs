@@ -14,6 +14,9 @@ use crate::{
     theme::{palette, provider_accent, Palette},
 };
 
+const FILLED_BAR_GLYPH: &str = "━";
+const EMPTY_BAR_GLYPH: &str = "─";
+
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
     let palette = palette();
@@ -251,11 +254,11 @@ fn push_bar(
 ) {
     let filled = usize::from(window.remaining_percent) * bar_width / 100;
     spans.push(Span::styled(
-        "█".repeat(filled),
+        FILLED_BAR_GLYPH.repeat(filled),
         Style::default().fg(accent),
     ));
     spans.push(Span::styled(
-        "░".repeat(bar_width - filled),
+        EMPTY_BAR_GLYPH.repeat(bar_width - filled),
         Style::default().fg(palette.border),
     ));
     spans.push(Span::styled(
@@ -342,11 +345,11 @@ fn detail_window(
         let bar_width = usize::from(width.saturating_sub(36)).clamp(4, 18);
         let filled = usize::from(window.remaining_percent) * bar_width / 100;
         spans.push(Span::styled(
-            "█".repeat(filled),
+            FILLED_BAR_GLYPH.repeat(filled),
             Style::default().fg(accent),
         ));
         spans.push(Span::styled(
-            "░".repeat(bar_width - filled),
+            EMPTY_BAR_GLYPH.repeat(bar_width - filled),
             Style::default().fg(palette.border),
         ));
         spans.push(Span::raw(" "));
@@ -576,7 +579,11 @@ mod tests {
         assert!(!first.contains("52%"));
         assert!(!second.contains("33%"));
         for row in [first, second, third] {
-            assert!(row.contains('█') && row.contains('░'), "{row:?}");
+            assert!(
+                row.contains(FILLED_BAR_GLYPH) && row.contains(EMPTY_BAR_GLYPH),
+                "{row:?}"
+            );
+            assert!(!row.contains('█') && !row.contains('░'), "{row:?}");
         }
         assert!(text(&backend, 3).contains("Claude"));
     }
