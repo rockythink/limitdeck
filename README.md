@@ -16,11 +16,11 @@ A compact, privacy-safe terminal dashboard for AI coding subscription limits.
 </div>
 
 <p align="center">
-  <img src="assets/limitdeck.gif" alt="LimitDeck showing Codex and Claude subscription limits in the Rainbow theme" width="800">
+  <code>brew install rockythink/tap/limitdeck</code>
 </p>
 
 <p align="center">
-  <code>brew install rockythink/tap/limitdeck</code>
+  <img src="assets/limitdeck.gif" alt="LimitDeck showing Codex and Claude subscription limits in the Rainbow theme" width="800">
 </p>
 
 ---

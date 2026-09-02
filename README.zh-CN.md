@@ -16,11 +16,11 @@
 </div>
 
 <p align="center">
-  <img src="assets/limitdeck.gif" alt="LimitDeck 使用 Rainbow 主题展示 Codex 与 Claude 订阅额度" width="800">
+  <code>brew install rockythink/tap/limitdeck</code>
 </p>
 
 <p align="center">
-  <code>brew install rockythink/tap/limitdeck</code>
+  <img src="assets/limitdeck.gif" alt="LimitDeck 使用 Rainbow 主题展示 Codex 与 Claude 订阅额度" width="800">
 </p>
 
 ---
