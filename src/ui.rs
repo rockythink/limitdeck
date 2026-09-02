@@ -16,6 +16,8 @@ use crate::{
 
 const FILLED_BAR_GLYPH: &str = "━";
 const EMPTY_BAR_GLYPH: &str = "─";
+const SPARK_SHORT_ACCENT: Color = Color::Rgb(42, 183, 184);
+const SPARK_LONG_ACCENT: Color = Color::Rgb(64, 145, 214);
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
@@ -146,9 +148,10 @@ fn stacked_plan_rows(
 ) -> Vec<Vec<Span<'static>>> {
     let accent = provider_accent(&state.identity.provider_id, palette);
     let name_width = 9usize;
+    let model_width = 8usize;
     let prefix_width = 2 + name_width;
     let bar_width = usize::from(width)
-        .saturating_sub(prefix_width + 11)
+        .saturating_sub(prefix_width + model_width + 11)
         .clamp(6, 24);
     let plan = state.plan.as_ref().expect("stacked rows require a plan");
 
@@ -170,6 +173,11 @@ fn stacked_plan_rows(
             } else {
                 vec![Span::raw(" ".repeat(prefix_width))]
             };
+            let row_accent = window_accent(window, accent);
+            spans.push(Span::styled(
+                fit_name(&compact_window_model(window), model_width),
+                Style::default().fg(row_accent),
+            ));
             let period = period_label(window.period);
             spans.push(Span::styled(
                 if window.period.is_some() {
@@ -179,7 +187,7 @@ fn stacked_plan_rows(
                 },
                 Style::default().fg(palette.muted),
             ));
-            push_bar(&mut spans, window, bar_width, accent, palette);
+            push_bar(&mut spans, window, bar_width, row_accent, palette);
 
             let phase = phase_text(state.phase);
             if index == 0 && !phase.is_empty() && width >= 64 {
@@ -231,7 +239,13 @@ fn plan_row(state: &PlanState, width: u16, selected: bool, palette: Palette) -> 
                 format!(" {} ", period_label(window.period)),
                 Style::default().fg(palette.muted),
             ));
-            push_bar(&mut spans, window, bar_width, accent, palette);
+            push_bar(
+                &mut spans,
+                window,
+                bar_width,
+                window_accent(window, accent),
+                palette,
+            );
         }
     }
 
@@ -265,6 +279,43 @@ fn push_bar(
         format!(" {:>3}%", window.remaining_percent),
         Style::default().fg(percent_color(window, palette)),
     ));
+}
+
+fn compact_window_model(window: &UsageWindow) -> String {
+    if is_spark_window(window) {
+        return "Spark".to_owned();
+    }
+    let label = window
+        .label
+        .split_once('·')
+        .map_or(window.label.as_str(), |(model, _)| model)
+        .trim();
+    if label.contains("Codex") {
+        "Codex".to_owned()
+    } else {
+        label.to_owned()
+    }
+}
+
+fn is_spark_window(window: &UsageWindow) -> bool {
+    window
+        .id
+        .split(':')
+        .any(|part| part.eq_ignore_ascii_case("spark"))
+        || window
+            .label
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|part| part.eq_ignore_ascii_case("spark"))
+}
+
+fn window_accent(window: &UsageWindow, default: Color) -> Color {
+    if !is_spark_window(window) {
+        return default;
+    }
+    match window.period {
+        Some(period) if period < Duration::from_secs(24 * 60 * 60) => SPARK_SHORT_ACCENT,
+        _ => SPARK_LONG_ACCENT,
+    }
 }
 
 fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &App, palette: Palette) {
@@ -301,7 +352,7 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &App, palette: Palette)
             .iter()
             .take(area.height.saturating_sub(1) as usize)
         {
-            let spans = detail_window(window, area.width, accent, palette);
+            let spans = detail_window(window, area.width, window_accent(window, accent), palette);
             render_line(frame, row(area, next_y), spans, palette.background);
             next_y += 1;
         }
@@ -495,21 +546,29 @@ mod tests {
             windows: values
                 .iter()
                 .enumerate()
-                .map(|(index, value)| UsageWindow {
-                    id: format!("{id}:{index}"),
-                    label: if index == 0 {
-                        "5 小时窗口".to_owned()
-                    } else {
-                        "7 天窗口".to_owned()
-                    },
-                    period: Some(if index == 0 {
-                        Duration::from_secs(5 * 60 * 60)
-                    } else {
-                        Duration::from_secs(7 * 24 * 60 * 60)
-                    }),
-                    remaining_percent: *value,
-                    resets_at: Some(SystemTime::now() + Duration::from_secs(7200)),
-                    status: UsageStatus::Available,
+                .map(|(index, value)| {
+                    let is_codex = id == "codex";
+                    let label = match (is_codex, index) {
+                        (true, 0) => "普通 Codex · 7 天",
+                        (true, 1) => "GPT-5.3-Codex-Spark · 5 小时",
+                        (true, _) => "GPT-5.3-Codex-Spark · 7 天",
+                        (false, 0) => "5 小时窗口",
+                        (false, _) => "7 天窗口",
+                    };
+                    let period = match (is_codex, index) {
+                        (true, 0) | (true, 2..) | (false, 1..) => {
+                            Duration::from_secs(7 * 24 * 60 * 60)
+                        }
+                        _ => Duration::from_secs(5 * 60 * 60),
+                    };
+                    UsageWindow {
+                        id: format!("{id}:{index}"),
+                        label: label.to_owned(),
+                        period: Some(period),
+                        remaining_percent: *value,
+                        resets_at: Some(SystemTime::now() + Duration::from_secs(7200)),
+                        status: UsageStatus::Available,
+                    }
                 })
                 .collect(),
         }
@@ -547,6 +606,15 @@ mod tests {
             .collect::<String>()
     }
 
+    fn bar_color(backend: &TestBackend, y: u16) -> Color {
+        (0..backend.buffer().area.width)
+            .find_map(|x| {
+                let cell = backend.buffer().cell((x, y)).unwrap();
+                (cell.symbol() == FILLED_BAR_GLYPH).then_some(cell.fg)
+            })
+            .expect("row should contain a filled progress track")
+    }
+
     #[test]
     fn two_plans_fit_in_two_rows() {
         let backend = draw(&populated_app(), 100, 2);
@@ -571,13 +639,22 @@ mod tests {
         let third = text(&backend, 2);
 
         assert!(
-            first.contains("Codex") && first.contains("71%"),
+            first.matches("Codex").count() == 2 && first.contains("7d") && first.contains("71%"),
             "{first:?}"
         );
-        assert!(second.contains("52%"), "{second:?}");
-        assert!(third.contains("33%"), "{third:?}");
-        assert!(!first.contains("52%"));
-        assert!(!second.contains("33%"));
+        assert!(
+            second.contains("Spark") && second.contains("5h") && second.contains("52%"),
+            "{second:?}"
+        );
+        assert!(
+            third.contains("Spark") && third.contains("7d") && third.contains("33%"),
+            "{third:?}"
+        );
+        assert_eq!(bar_color(&backend, 0), provider_accent("openai", palette()));
+        assert_eq!(bar_color(&backend, 1), SPARK_SHORT_ACCENT);
+        assert_eq!(bar_color(&backend, 2), SPARK_LONG_ACCENT);
+        assert_ne!(bar_color(&backend, 0), bar_color(&backend, 1));
+        assert_ne!(bar_color(&backend, 1), bar_color(&backend, 2));
         for row in [first, second, third] {
             assert!(
                 row.contains(FILLED_BAR_GLYPH) && row.contains(EMPTY_BAR_GLYPH),
@@ -650,8 +727,10 @@ mod tests {
         let backend = draw(&app, 80, 5);
         let rendered = (0..5).map(|y| text(&backend, y)).collect::<String>();
         let compact = rendered.replace(' ', "");
-        assert!(compact.contains("5小时窗口"), "{rendered:?}");
-        assert!(compact.contains("7天窗口"));
+        assert!(compact.contains("普通Codex·7天"), "{rendered:?}");
+        assert!(compact.contains("GPT-5.3-Codex-Spark·5小时"));
+        assert_eq!(bar_color(&backend, 1), provider_accent("openai", palette()));
+        assert_eq!(bar_color(&backend, 2), SPARK_SHORT_ACCENT);
         assert!(compact.contains("后重置"));
         assert!(compact.contains("Esc返回"));
     }
