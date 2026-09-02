@@ -14,6 +14,7 @@ use crate::{
     app::{App, PlanPhase, PlanState},
     domain::{UsageStatus, UsageWindow},
     history::{HistorySample, UsageHistory},
+    locale::{Language, UiCopy},
     theme::{provider_accent, Palette, Theme},
 };
 
@@ -23,6 +24,8 @@ const EMPTY_BAR_GLYPH: &str = "─";
 pub fn render(frame: &mut Frame<'_>, app: &App, history: &UsageHistory) {
     let area = frame.area();
     let palette = app.theme().palette();
+    let language = app.language();
+    let copy = language.copy();
     frame.render_widget(
         Block::default().style(Style::default().bg(palette.background)),
         area,
@@ -38,24 +41,30 @@ pub fn render(frame: &mut Frame<'_>, app: &App, history: &UsageHistory) {
     };
 
     if app.is_detail_open() {
-        render_detail(frame, content_area, app, history, palette);
+        render_detail(frame, content_area, app, history, palette, language);
     } else {
-        render_plan_list(frame, content_area, app, palette);
+        render_plan_list(frame, content_area, app, palette, language);
     }
 
     if let Some(footer_area) = footer_area {
         let prefix = if app.is_detail_open() {
-            "  Esc 返回 · r 刷新 · t "
+            copy.detail_footer_prefix
         } else {
-            "  ↑↓/jk 选择 · Enter 详情 · r 刷新 · t "
+            copy.list_footer_prefix
         };
-        let spans = footer_spans(prefix, app.theme(), palette);
+        let spans = footer_spans(prefix, app.theme(), language, copy, palette);
         render_line(frame, footer_area, spans, palette.background);
     }
 }
 
-fn footer_spans(prefix: &'static str, theme: Theme, palette: Palette) -> Vec<Span<'static>> {
-    let mut spans = Vec::with_capacity(9);
+fn footer_spans(
+    prefix: &'static str,
+    theme: Theme,
+    language: Language,
+    copy: UiCopy,
+    palette: Palette,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(13);
     spans.push(Span::styled(prefix, Style::default().fg(palette.muted)));
     if theme == Theme::Rainbow {
         for (letter, color) in [
@@ -81,22 +90,39 @@ fn footer_spans(prefix: &'static str, theme: Theme, palette: Palette) -> Vec<Spa
         ));
     }
     spans.push(Span::styled(
-        " · q 退出",
+        copy.footer_language_separator,
+        Style::default().fg(palette.muted),
+    ));
+    spans.push(Span::styled(
+        language.label(),
+        Style::default()
+            .fg(palette.warning)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(
+        copy.footer_quit,
         Style::default().fg(palette.muted),
     ));
     spans
 }
 
-fn render_plan_list(frame: &mut Frame<'_>, area: Rect, app: &App, palette: Palette) {
+fn render_plan_list(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    palette: Palette,
+    language: Language,
+) {
     if area.width < 12 || area.height == 0 {
         return;
     }
+    let copy = language.copy();
     if app.plans().is_empty() {
         render_line(
             frame,
             row(area, 0),
             vec![Span::styled(
-                "未发现 Coding Plan",
+                copy.no_plans,
                 Style::default().fg(palette.muted),
             )],
             palette.background,
@@ -106,7 +132,7 @@ fn render_plan_list(frame: &mut Frame<'_>, area: Rect, app: &App, palette: Palet
                 frame,
                 row(area, 1),
                 vec![Span::styled(
-                    "先运行 Claude 状态行接入或安装 OMP",
+                    copy.no_plans_hint,
                     Style::default().fg(palette.muted),
                 )],
                 palette.background,
@@ -126,7 +152,14 @@ fn render_plan_list(frame: &mut Frame<'_>, area: Rect, app: &App, palette: Palet
         } else {
             palette.background
         };
-        let rows = plan_rows(plan, area.width, viewport_height, selected, palette);
+        let rows = plan_rows(
+            plan,
+            area.width,
+            viewport_height,
+            selected,
+            palette,
+            language,
+        );
         if screen_row + rows.len() > viewport_height {
             break;
         }
@@ -174,11 +207,12 @@ fn plan_rows(
     viewport_height: usize,
     selected: bool,
     palette: Palette,
+    language: Language,
 ) -> Vec<Vec<Span<'static>>> {
     if uses_stacked_rows(state, width, viewport_height) {
-        return stacked_plan_rows(state, width, selected, palette);
+        return stacked_plan_rows(state, width, selected, palette, language);
     }
-    vec![plan_row(state, width, selected, palette)]
+    vec![plan_row(state, width, selected, palette, language)]
 }
 
 fn stacked_plan_rows(
@@ -186,6 +220,7 @@ fn stacked_plan_rows(
     width: u16,
     selected: bool,
     palette: Palette,
+    language: Language,
 ) -> Vec<Vec<Span<'static>>> {
     let accent = provider_accent(&state.identity.provider_id, palette);
     let name_width = 9usize;
@@ -219,18 +254,18 @@ fn stacked_plan_rows(
                 fit_name(&compact_window_model(window), model_width),
                 Style::default().fg(row_accent),
             ));
-            let period = period_label(window.period);
+            let period = period_label(window.period, language);
             spans.push(Span::styled(
                 if window.period.is_some() {
                     format!(" {period:>4} ")
                 } else {
-                    " 配额 ".to_owned()
+                    format!(" {} ", language.copy().quota)
                 },
                 Style::default().fg(palette.muted),
             ));
             push_bar(&mut spans, window, bar_width, row_accent, palette);
 
-            let phase = phase_text(state.phase);
+            let phase = phase_text(state.phase, language);
             if index == 0 && !phase.is_empty() && width >= 64 {
                 spans.push(Span::styled(
                     format!(" {phase}"),
@@ -242,7 +277,13 @@ fn stacked_plan_rows(
         .collect()
 }
 
-fn plan_row(state: &PlanState, width: u16, selected: bool, palette: Palette) -> Vec<Span<'static>> {
+fn plan_row(
+    state: &PlanState,
+    width: u16,
+    selected: bool,
+    palette: Palette,
+    language: Language,
+) -> Vec<Span<'static>> {
     let accent = provider_accent(&state.identity.provider_id, palette);
     let mut spans = vec![Span::styled(
         if selected { "› " } else { "  " },
@@ -256,7 +297,7 @@ fn plan_row(state: &PlanState, width: u16, selected: bool, palette: Palette) -> 
 
     let Some(plan) = &state.plan else {
         spans.push(Span::styled(
-            phase_text(state.phase),
+            phase_text(state.phase, language),
             Style::default().fg(palette.muted),
         ));
         return spans;
@@ -277,7 +318,7 @@ fn plan_row(state: &PlanState, width: u16, selected: bool, palette: Palette) -> 
         let bar_width = bar_width(width, name_width, plan.windows.len());
         for window in &plan.windows {
             spans.push(Span::styled(
-                format!(" {} ", period_label(window.period)),
+                format!(" {} ", period_label(window.period, language)),
                 Style::default().fg(palette.muted),
             ));
             push_bar(
@@ -290,7 +331,7 @@ fn plan_row(state: &PlanState, width: u16, selected: bool, palette: Palette) -> 
         }
     }
 
-    let phase = phase_text(state.phase);
+    let phase = phase_text(state.phase, language);
     if !phase.is_empty() && width >= 64 {
         spans.push(Span::styled(
             format!(" {phase}"),
@@ -338,6 +379,21 @@ fn compact_window_model(window: &UsageWindow) -> String {
     }
 }
 
+fn localized_window_label(window: &UsageWindow, language: Language) -> String {
+    if window.id.ends_with(":spend-limit") {
+        return match language {
+            Language::English => "Claude · Spend limit".to_owned(),
+            Language::Chinese => "Claude · 消费限额".to_owned(),
+        };
+    }
+    let model = window
+        .label
+        .split_once('·')
+        .map_or(window.label.as_str(), |(model, _)| model)
+        .trim();
+    format!("{model} · {}", long_period_label(window.period, language))
+}
+
 fn is_spark_window(window: &UsageWindow) -> bool {
     window
         .id
@@ -365,6 +421,7 @@ fn render_detail(
     app: &App,
     history: &UsageHistory,
     palette: Palette,
+    language: Language,
 ) {
     if area.width < 12 || area.height == 0 {
         return;
@@ -372,12 +429,13 @@ fn render_detail(
     let Some(state) = app.selected_plan() else {
         return;
     };
+    let copy = language.copy();
     let accent = provider_accent(&state.identity.provider_id, palette);
     let freshness = state
         .plan
         .as_ref()
-        .map(|plan| freshness(plan.fetched_at))
-        .unwrap_or_else(|| phase_text(state.phase).to_owned());
+        .map(|plan| freshness(plan.fetched_at, language))
+        .unwrap_or_else(|| phase_text(state.phase, language).to_owned());
     render_line(
         frame,
         row(area, 0),
@@ -395,7 +453,12 @@ fn render_detail(
     let mut next_y = 1;
     if let Some(error) = state.error {
         if next_y < area.height {
-            let reason = format!("原因  {} · {}", error.source, diagnostic_title(error.kind));
+            let reason = format!(
+                "{}  {} · {}",
+                copy.reason,
+                error.source,
+                diagnostic_title(error.kind, language)
+            );
             render_line(
                 frame,
                 row(area, next_y),
@@ -408,7 +471,7 @@ fn render_detail(
             next_y += 1;
         }
         if next_y < area.height {
-            let action = format!("处理  {}", diagnostic_action(error));
+            let action = format!("{}  {}", copy.action, diagnostic_action(error, language));
             render_line(
                 frame,
                 row(area, next_y),
@@ -423,34 +486,41 @@ fn render_detail(
     }
 
     if let Some(plan) = &state.plan {
-        let detail_label_width = plan
+        let labels = plan
             .windows
             .iter()
-            .map(|window| window.label.width())
-            .max()
-            .unwrap_or(0)
-            .min(usize::from(area.width).saturating_sub(12));
-        let reset_width = plan
-            .windows
-            .iter()
-            .map(|window| reset_text(window.resets_at).width())
-            .max()
-            .unwrap_or(0);
+            .map(|window| localized_window_label(window, language))
+            .collect::<Vec<_>>();
+        let columns = DetailColumns {
+            label: labels
+                .iter()
+                .map(|label| label.width())
+                .max()
+                .unwrap_or(0)
+                .min(usize::from(area.width).saturating_sub(12)),
+            reset: plan
+                .windows
+                .iter()
+                .map(|window| reset_text(window.resets_at, language).width())
+                .max()
+                .unwrap_or(0),
+        };
         let available_rows = usize::from(area.height.saturating_sub(next_y));
         let show_trends =
             area.width >= 40 && available_rows >= plan.windows.len().saturating_mul(2);
-        for window in &plan.windows {
+        for (window, label) in plan.windows.iter().zip(labels) {
             if next_y >= area.height {
                 break;
             }
             let window_accent = window_accent(window, accent, palette);
             let spans = detail_window(
                 window,
+                &label,
                 area.width,
-                detail_label_width,
-                reset_width,
+                columns,
                 window_accent,
                 palette,
+                language,
             );
             render_line(frame, row(area, next_y), spans, palette.background);
             next_y += 1;
@@ -460,7 +530,7 @@ fn render_detail(
                 render_line(
                     frame,
                     row(area, next_y),
-                    trend_line(samples, area.width, window_accent, palette),
+                    trend_line(samples, area.width, window_accent, palette, language),
                     palette.background,
                 );
                 next_y += 1;
@@ -471,7 +541,7 @@ fn render_detail(
             frame,
             row(area, next_y),
             vec![Span::styled(
-                phase_text(state.phase),
+                phase_text(state.phase, language),
                 Style::default().fg(palette.muted),
             )],
             palette.background,
@@ -479,34 +549,72 @@ fn render_detail(
     }
 }
 
-fn diagnostic_title(kind: AdapterErrorKind) -> &'static str {
-    match kind {
-        AdapterErrorKind::CommandNotFound => "未找到来源命令",
-        AdapterErrorKind::NotAuthenticated => "来源尚未登录",
-        AdapterErrorKind::TimedOut => "来源响应超时",
-        AdapterErrorKind::ProtocolChanged => "来源数据格式已变化",
-        AdapterErrorKind::SnapshotMissing => "尚无用量快照",
-        AdapterErrorKind::SnapshotExpired => "缓存快照已过期",
+fn diagnostic_title(kind: AdapterErrorKind, language: Language) -> &'static str {
+    match (language, kind) {
+        (Language::English, AdapterErrorKind::CommandNotFound) => "Source command not found",
+        (Language::English, AdapterErrorKind::NotAuthenticated) => "Source is not signed in",
+        (Language::English, AdapterErrorKind::TimedOut) => "Source timed out",
+        (Language::English, AdapterErrorKind::ProtocolChanged) => "Source data format changed",
+        (Language::English, AdapterErrorKind::SnapshotMissing) => "No usage snapshot yet",
+        (Language::English, AdapterErrorKind::SnapshotExpired) => "Cached snapshot expired",
+        (Language::Chinese, AdapterErrorKind::CommandNotFound) => "未找到来源命令",
+        (Language::Chinese, AdapterErrorKind::NotAuthenticated) => "来源尚未登录",
+        (Language::Chinese, AdapterErrorKind::TimedOut) => "来源响应超时",
+        (Language::Chinese, AdapterErrorKind::ProtocolChanged) => "来源数据格式已变化",
+        (Language::Chinese, AdapterErrorKind::SnapshotMissing) => "尚无用量快照",
+        (Language::Chinese, AdapterErrorKind::SnapshotExpired) => "缓存快照已过期",
     }
 }
 
-fn diagnostic_action(error: AdapterError) -> String {
-    match error.kind {
-        AdapterErrorKind::CommandNotFound => {
+fn diagnostic_action(error: AdapterError, language: Language) -> String {
+    match (language, error.kind) {
+        (Language::English, AdapterErrorKind::CommandNotFound) => format!(
+            "Install {}, confirm it is on PATH, then press r to retry",
+            error.source
+        ),
+        (Language::English, AdapterErrorKind::NotAuthenticated) => {
+            format!("Sign in to {}, then press r to retry", error.source)
+        }
+        (Language::English, AdapterErrorKind::TimedOut) => {
+            "Check the network connection, then press r to retry".to_owned()
+        }
+        (Language::English, AdapterErrorKind::ProtocolChanged) => {
+            "Upgrade LimitDeck; open an issue if it still fails".to_owned()
+        }
+        (Language::English, AdapterErrorKind::SnapshotMissing)
+            if error.source == "Claude statusline" =>
+        {
+            "Configure Claude statusLine to run limitdeck ingest claude, then press r to retry"
+                .to_owned()
+        }
+        (Language::English, AdapterErrorKind::SnapshotMissing) => {
+            format!(
+                "Run {} to create a snapshot, then press r to retry",
+                error.source
+            )
+        }
+        (Language::English, AdapterErrorKind::SnapshotExpired) => {
+            format!("Refresh {}, then press r to retry", error.source)
+        }
+        (Language::Chinese, AdapterErrorKind::CommandNotFound) => {
             format!("安装 {}，确认命令已加入 PATH，然后按 r 重试", error.source)
         }
-        AdapterErrorKind::NotAuthenticated => {
+        (Language::Chinese, AdapterErrorKind::NotAuthenticated) => {
             format!("登录 {}，然后按 r 重试", error.source)
         }
-        AdapterErrorKind::TimedOut => "检查网络连接，稍后按 r 重试".to_owned(),
-        AdapterErrorKind::ProtocolChanged => "升级 LimitDeck；若仍失败，请提交 issue".to_owned(),
-        AdapterErrorKind::SnapshotMissing if error.source == "Claude statusline" => {
-            "配置 Claude statusLine 使用 limitdeck claude-statusline，然后按 r 重试".to_owned()
+        (Language::Chinese, AdapterErrorKind::TimedOut) => "检查网络连接，然后按 r 重试".to_owned(),
+        (Language::Chinese, AdapterErrorKind::ProtocolChanged) => {
+            "升级 LimitDeck；若仍失败，请提交 issue".to_owned()
         }
-        AdapterErrorKind::SnapshotMissing => {
+        (Language::Chinese, AdapterErrorKind::SnapshotMissing)
+            if error.source == "Claude statusline" =>
+        {
+            "配置 Claude statusLine 运行 limitdeck ingest claude，然后按 r 重试".to_owned()
+        }
+        (Language::Chinese, AdapterErrorKind::SnapshotMissing) => {
             format!("先运行 {} 生成快照，然后按 r 重试", error.source)
         }
-        AdapterErrorKind::SnapshotExpired => {
+        (Language::Chinese, AdapterErrorKind::SnapshotExpired) => {
             format!("刷新 {}，然后按 r 重试", error.source)
         }
     }
@@ -517,19 +625,21 @@ fn trend_line(
     width: u16,
     accent: Color,
     palette: Palette,
+    language: Language,
 ) -> Vec<Span<'static>> {
     let samples = current_cycle(samples);
+    let copy = language.copy();
     let mut spans = vec![Span::raw("    ")];
     let Some(first) = samples.first() else {
         spans.push(Span::styled(
-            "历史收集中",
+            copy.history_collecting,
             Style::default().fg(palette.muted),
         ));
         return spans;
     };
     if samples.len() == 1 {
         spans.push(Span::styled(
-            "历史收集中 · 1 个样本",
+            copy.history_one_sample,
             Style::default().fg(palette.muted),
         ));
         return spans;
@@ -538,14 +648,18 @@ fn trend_line(
     let last = samples
         .last()
         .expect("history contains at least two samples");
-    let span = history_span(first.at_millis, last.at_millis);
+    let span = history_span(first.at_millis, last.at_millis, language);
     let delta = i16::from(last.remaining_percent) - i16::from(first.remaining_percent);
     if delta == 0 {
+        let flat = match language {
+            Language::English => "flat",
+            Language::Chinese => "持平",
+        };
         spans.push(Span::styled(
             format!(
-                "{span}  {}% · 持平 · {} 个样本",
+                "{span}  {}% · {flat} · {}",
                 last.remaining_percent,
-                samples.len()
+                sample_count(samples.len(), language)
             ),
             Style::default().fg(palette.muted),
         ));
@@ -574,11 +688,11 @@ fn trend_line(
     } else {
         spans.push(Span::styled(
             format!(
-                "{}% → {}% · {} · {} 个样本",
+                "{}% → {}% · {} · {}",
                 first.remaining_percent,
                 last.remaining_percent,
                 delta_text(delta),
-                samples.len()
+                sample_count(samples.len(), language)
             ),
             Style::default().fg(palette.muted),
         ));
@@ -594,17 +708,38 @@ fn current_cycle(samples: &[HistorySample]) -> &[HistorySample] {
     &samples[start..]
 }
 
-fn history_span(first_millis: u64, last_millis: u64) -> String {
+fn history_span(first_millis: u64, last_millis: u64, language: Language) -> String {
     let seconds = last_millis.saturating_sub(first_millis) / 1_000;
-    if seconds < 60 {
-        format!("近 {} 秒", seconds.max(1))
+    let (value, unit) = if seconds < 60 {
+        (seconds.max(1), "second")
     } else if seconds < 60 * 60 {
-        format!("近 {} 分钟", seconds / 60)
+        (seconds / 60, "minute")
     } else if seconds < 24 * 60 * 60 {
-        format!("近 {} 小时", seconds / (60 * 60))
+        (seconds / (60 * 60), "hour")
     } else {
-        format!("近 {} 天", seconds / (24 * 60 * 60))
+        (seconds / (24 * 60 * 60), "day")
+    };
+    match language {
+        Language::English => format!("Last {}", count_with_unit(value, unit)),
+        Language::Chinese => match unit {
+            "second" => format!("近 {value} 秒"),
+            "minute" => format!("近 {value} 分钟"),
+            "hour" => format!("近 {value} 小时"),
+            _ => format!("近 {value} 天"),
+        },
     }
+}
+
+fn sample_count(count: usize, language: Language) -> String {
+    match language {
+        Language::English => count_with_unit(count as u64, "sample"),
+        Language::Chinese => format!("{count} 个样本"),
+    }
+}
+
+fn count_with_unit(value: u64, unit: &str) -> String {
+    let suffix = if value == 1 { "" } else { "s" };
+    format!("{value} {unit}{suffix}")
 }
 
 fn delta_text(delta: i16) -> String {
@@ -656,21 +791,28 @@ fn braille_chart(samples: &[HistorySample], width: usize) -> String {
     graph
 }
 
+#[derive(Clone, Copy)]
+struct DetailColumns {
+    label: usize,
+    reset: usize,
+}
+
 fn detail_window(
     window: &UsageWindow,
+    localized_label: &str,
     width: u16,
-    label_width: usize,
-    reset_width: usize,
+    columns: DetailColumns,
     accent: Color,
     palette: Palette,
+    language: Language,
 ) -> Vec<Span<'static>> {
-    let label = fit_display_width(&window.label, label_width);
-    let label_padding = label_width.saturating_sub(label.width());
+    let label = fit_display_width(localized_label, columns.label);
+    let label_padding = columns.label.saturating_sub(label.width());
     let percent = compact_percent(window);
-    let reset = reset_text(window.resets_at);
+    let reset = reset_text(window.resets_at, language);
     let total_width = usize::from(width);
-    let fixed_width = 2 + label_width + 2 + 4;
-    let reset_columns = 2 + reset_width;
+    let fixed_width = 2 + columns.label + 2 + 4;
+    let reset_columns = 2 + columns.reset;
     let show_reset = width >= 48 && total_width >= fixed_width + 1 + 4 + reset_columns;
     let reserved_width = fixed_width + 1 + usize::from(show_reset) * reset_columns;
     let bar_width = if width >= 40 && total_width >= reserved_width + 4 {
@@ -786,58 +928,105 @@ fn percent_color(window: &UsageWindow, palette: Palette) -> Color {
     }
 }
 
-fn period_label(period: Option<Duration>) -> String {
+fn period_label(period: Option<Duration>, language: Language) -> String {
     let Some(period) = period else {
-        return "配额".to_owned();
+        return language.copy().quota.to_owned();
     };
     let hours = period.as_secs() / 3600;
-    if hours >= 24 && hours % 24 == 0 {
-        format!("{}d", hours / 24)
-    } else {
-        format!("{hours}h")
+    match (language, hours >= 24 && hours % 24 == 0) {
+        (Language::English, true) => format!("{}d", hours / 24),
+        (Language::English, false) => format!("{hours}h"),
+        (Language::Chinese, true) => format!("{}天", hours / 24),
+        (Language::Chinese, false) => format!("{hours}时"),
     }
 }
 
-fn phase_text(phase: PlanPhase) -> &'static str {
+fn long_period_label(period: Option<Duration>, language: Language) -> String {
+    let Some(period) = period else {
+        return language.copy().quota.to_owned();
+    };
+    let hours = period.as_secs() / 3600;
+    let (value, unit) = if hours >= 24 && hours % 24 == 0 {
+        (hours / 24, "day")
+    } else {
+        (hours, "hour")
+    };
+    match language {
+        Language::English => count_with_unit(value, unit),
+        Language::Chinese if unit == "day" => format!("{value} 天"),
+        Language::Chinese => format!("{value} 小时"),
+    }
+}
+
+fn phase_text(phase: PlanPhase, language: Language) -> &'static str {
+    let copy = language.copy();
     match phase {
-        PlanPhase::Loading => "加载中",
+        PlanPhase::Loading => copy.loading,
         PlanPhase::Refreshing => "↻",
         PlanPhase::Ready => "",
-        PlanPhase::Stale => "缓存",
-        PlanPhase::Unavailable => "不可用 · Enter 查看原因",
+        PlanPhase::Stale => copy.stale,
+        PlanPhase::Unavailable => copy.unavailable,
     }
 }
 
-fn freshness(fetched_at: SystemTime) -> String {
+fn freshness(fetched_at: SystemTime, language: Language) -> String {
     let age = SystemTime::now()
         .duration_since(fetched_at)
         .unwrap_or(Duration::ZERO);
-    if age.as_secs() < 60 {
-        "刚刚更新".to_owned()
-    } else if age.as_secs() < 3600 {
-        format!("{} 分钟前更新", age.as_secs() / 60)
-    } else if age.as_secs() < 86_400 {
-        format!("{} 小时前更新", age.as_secs() / 3600)
+    let seconds = age.as_secs();
+    if seconds < 60 {
+        return match language {
+            Language::English => "Updated just now".to_owned(),
+            Language::Chinese => "刚刚更新".to_owned(),
+        };
+    }
+    let (value, unit) = if seconds < 3600 {
+        (seconds / 60, "minute")
+    } else if seconds < 86_400 {
+        (seconds / 3600, "hour")
     } else {
-        format!("{} 天前更新", age.as_secs() / 86_400)
+        (seconds / 86_400, "day")
+    };
+    match language {
+        Language::English => format!("Updated {} ago", count_with_unit(value, unit)),
+        Language::Chinese if unit == "minute" => format!("{value} 分钟前更新"),
+        Language::Chinese if unit == "hour" => format!("{value} 小时前更新"),
+        Language::Chinese => format!("{value} 天前更新"),
     }
 }
 
-fn reset_text(resets_at: Option<SystemTime>) -> String {
+fn reset_text(resets_at: Option<SystemTime>, language: Language) -> String {
     let Some(resets_at) = resets_at else {
-        return "重置时间未知".to_owned();
+        return match language {
+            Language::English => "Reset time unknown".to_owned(),
+            Language::Chinese => "重置时间未知".to_owned(),
+        };
     };
     let Ok(remaining) = resets_at.duration_since(SystemTime::now()) else {
-        return "已重置".to_owned();
+        return match language {
+            Language::English => "Reset".to_owned(),
+            Language::Chinese => "已重置".to_owned(),
+        };
     };
-    if remaining.as_secs() < 60 {
-        "1 分钟内重置".to_owned()
-    } else if remaining.as_secs() < 3600 {
-        format!("{} 分钟后重置", remaining.as_secs() / 60)
-    } else if remaining.as_secs() < 86_400 {
-        format!("{} 小时后重置", remaining.as_secs() / 3600)
+    let seconds = remaining.as_secs();
+    if seconds < 60 {
+        return match language {
+            Language::English => "Resets within 1 minute".to_owned(),
+            Language::Chinese => "1 分钟内重置".to_owned(),
+        };
+    }
+    let (value, unit) = if seconds < 3600 {
+        (seconds / 60, "minute")
+    } else if seconds < 86_400 {
+        (seconds / 3600, "hour")
     } else {
-        format!("{} 天后重置", remaining.as_secs() / 86_400)
+        (seconds / 86_400, "day")
+    };
+    match language {
+        Language::English => format!("Resets in {}", count_with_unit(value, unit)),
+        Language::Chinese if unit == "minute" => format!("{value} 分钟后重置"),
+        Language::Chinese if unit == "hour" => format!("{value} 小时后重置"),
+        Language::Chinese => format!("{value} 天后重置"),
     }
 }
 
@@ -869,11 +1058,11 @@ mod tests {
                 .map(|(index, value)| {
                     let is_codex = id == "codex";
                     let label = match (is_codex, index) {
-                        (true, 0) => "普通 Codex · 7 天",
-                        (true, 1) => "GPT-5.3-Codex-Spark · 5 小时",
-                        (true, _) => "GPT-5.3-Codex-Spark · 7 天",
-                        (false, 0) => "5 小时窗口",
-                        (false, _) => "7 天窗口",
+                        (true, 0) => "Codex · 7 days",
+                        (true, 1) => "GPT-5.3-Codex-Spark · 5 hours",
+                        (true, _) => "GPT-5.3-Codex-Spark · 7 days",
+                        (false, 0) => "Claude · 5 hours",
+                        (false, _) => "Claude · 7 days",
                     };
                     let period = match (is_codex, index) {
                         (true, 0) | (true, 2..) | (false, 1..) => {
@@ -898,6 +1087,7 @@ mod tests {
         let codex = PlanIdentity::new("codex", "openai", "Codex");
         let claude = PlanIdentity::new("claude", "anthropic", "Claude");
         let mut app = App::new([codex.clone(), claude.clone()]);
+        app.set_language(Language::English);
         app.apply_event(PlanEvent::Fetched {
             identity: codex,
             result: Ok(plan("codex", "openai", "Codex", values)),
@@ -1018,7 +1208,10 @@ mod tests {
         }
         assert!(text(&backend, 3).contains("Claude"));
         let footer = text(&backend, 4);
-        assert!(footer.replace(' ', "").contains("Enter详情"), "{footer:?}");
+        assert!(
+            footer.replace(' ', "").contains("EnterDetails"),
+            "{footer:?}"
+        );
     }
 
     #[test]
@@ -1086,29 +1279,38 @@ mod tests {
         let backend = draw(&app, 80, 5);
         let rendered = (0..5).map(|y| text(&backend, y)).collect::<String>();
         let compact = rendered.replace(' ', "");
-        assert!(compact.contains("普通Codex·7天"), "{rendered:?}");
-        assert!(compact.contains("GPT-5.3-Codex-Spark·5小时"));
+        assert!(compact.contains("Codex·7days"), "{rendered:?}");
+        assert!(compact.contains("GPT-5.3-Codex-Spark·5hours"));
         assert_eq!(
             bar_color(&backend, 1),
             provider_accent("openai", test_palette())
         );
         assert_eq!(bar_color(&backend, 2), test_palette().spark_short);
-        assert!(compact.contains("后重置"));
+        assert!(compact.contains("Resetsin"));
         let footer = text(&backend, 4);
-        assert!(footer.replace(' ', "").contains("Esc返回"), "{footer:?}");
+        assert!(footer.replace(' ', "").contains("EscBack"), "{footer:?}");
     }
 
     #[test]
     fn list_footer_stays_on_last_row() {
         let backend = draw(&populated_app(), 80, 8);
         let footer = text(&backend, 7);
-        assert!(footer.replace(' ', "").contains("Enter详情"), "{footer:?}");
-        assert!(!text(&backend, 2).contains("Enter 详情"));
+        assert!(
+            footer.replace(' ', "").contains("EnterDetails"),
+            "{footer:?}"
+        );
+        assert!(!text(&backend, 2).contains("Enter Details"));
     }
 
     #[test]
     fn rainbow_footer_label_uses_seven_distinct_colors() {
-        let spans = footer_spans("", Theme::Rainbow, Theme::Rainbow.palette());
+        let spans = footer_spans(
+            "",
+            Theme::Rainbow,
+            Language::English,
+            Language::English.copy(),
+            Theme::Rainbow.palette(),
+        );
         let colors = spans[1..8]
             .iter()
             .map(|span| span.style.fg)
@@ -1157,10 +1359,38 @@ mod tests {
     }
 
     #[test]
+    fn language_cycle_rewrites_list_detail_and_footer_copy() {
+        let mut app = populated_app();
+        let english = draw(&app, 100, 8);
+        assert!(text(&english, 7).contains("Select"));
+        assert!(text(&english, 7).contains("EN"));
+
+        app.cycle_language();
+        let chinese = draw(&app, 100, 8);
+        let chinese_footer = text(&chinese, 7).replace(' ', "");
+        assert!(chinese_footer.contains("选择"));
+        assert!(chinese_footer.contains("中文"));
+        let chinese_list = (0..7)
+            .map(|y| text(&chinese, y))
+            .collect::<String>()
+            .replace(' ', "");
+        assert!(chinese_list.contains("7天"), "{chinese_list:?}");
+        assert!(chinese_list.contains("5时"), "{chinese_list:?}");
+
+        app.toggle_detail();
+        let detail = draw(&app, 100, 6);
+        let rendered = (0..6).map(|y| text(&detail, y)).collect::<String>();
+        let compact = rendered.replace(' ', "");
+        assert!(compact.contains("刚刚更新"), "{rendered:?}");
+        assert!(compact.contains("小时后重置"), "{rendered:?}");
+    }
+
+    #[test]
     fn unavailable_plan_does_not_hide_healthy_plan() {
         let first = PlanIdentity::new("codex", "openai", "Codex");
         let second = PlanIdentity::new("claude", "anthropic", "Claude");
         let mut app = App::new([first.clone(), second.clone()]);
+        app.set_language(Language::English);
         app.apply_event(PlanEvent::Fetched {
             identity: first,
             result: Ok(plan("codex", "openai", "Codex", &[71])),
@@ -1176,7 +1406,7 @@ mod tests {
         assert!(text(&backend, 0).contains("71%"));
         let unavailable_row = text(&backend, 1);
         assert!(
-            unavailable_row.replace(' ', "").contains("不可用"),
+            unavailable_row.replace(' ', "").contains("Unavailable"),
             "{unavailable_row:?}"
         );
     }
@@ -1211,11 +1441,11 @@ mod tests {
         let second_compact = second_trend.replace(' ', "");
         assert!(contains_braille(&first_trend), "{first_trend:?}");
         assert!(contains_braille(&second_trend), "{second_trend:?}");
-        assert!(first_compact.contains("近2秒"), "{first_trend:?}");
+        assert!(first_compact.contains("Last2seconds"), "{first_trend:?}");
         assert!(first_compact.contains("71%→55%·−16%"), "{first_trend:?}");
         assert!(second_compact.contains("52%→48%·−4%"), "{second_trend:?}");
-        assert!(!first_compact.contains("旧→新"));
-        assert!(text(&backend, 6).replace(' ', "").contains("Esc返回"));
+        assert!(!first_compact.contains("old→new"));
+        assert!(text(&backend, 6).replace(' ', "").contains("EscBack"));
     }
 
     #[test]
@@ -1233,7 +1463,10 @@ mod tests {
         let backend = draw_with_history(&app, &history, 80, 7);
         let trend = text(&backend, 2);
         let compact = trend.replace(' ', "");
-        assert!(compact.contains("近1秒71%·持平·2个样本"), "{trend:?}");
+        assert!(
+            compact.contains("Last1second71%·flat·2samples"),
+            "{trend:?}"
+        );
         assert!(!contains_braille(&trend), "{trend:?}");
     }
 
@@ -1244,7 +1477,7 @@ mod tests {
         let backend = draw(&app, 80, 7);
         let trend = text(&backend, 2);
         let compact = trend.replace(' ', "");
-        assert!(compact.contains("历史收集中"), "{trend:?}");
+        assert!(compact.contains("Collectinghistory"), "{trend:?}");
         assert!(!contains_braille(&trend), "{trend:?}");
     }
 
@@ -1297,19 +1530,19 @@ mod tests {
             let compact = row.replace(' ', "");
             assert!(contains_braille(&row), "{row:?}");
             assert!(
-                compact.contains("近2秒") && compact.contains('→'),
+                compact.contains("Last2seconds") && compact.contains('→'),
                 "{row:?}"
             );
         }
-        assert!(text(&tall, 7).replace(' ', "").contains("Esc返回"));
+        assert!(text(&tall, 7).replace(' ', "").contains("EscBack"));
 
         let short = draw_with_history(&app, &history, 80, 5);
         let rendered = (0..5).map(|y| text(&short, y)).collect::<String>();
         let compact = rendered.replace(' ', "");
-        assert!(compact.contains("普通Codex"), "{rendered:?}");
+        assert!(compact.contains("Codex·7days"), "{rendered:?}");
         assert_eq!(compact.matches("GPT-5.3-Codex-Spark").count(), 2);
         assert!(!contains_braille(&rendered), "{rendered:?}");
-        assert!(text(&short, 4).replace(' ', "").contains("Esc返回"));
+        assert!(text(&short, 4).replace(' ', "").contains("EscBack"));
     }
 
     #[test]
@@ -1322,7 +1555,7 @@ mod tests {
         for row in rows {
             let rendered = text(&backend, row);
             assert!(
-                rendered.replace(' ', "").contains("小时后重置"),
+                rendered.replace(' ', "").contains("Resetsin1hour"),
                 "{rendered:?}"
             );
         }
@@ -1341,9 +1574,16 @@ mod tests {
     }
     #[test]
     fn relative_time_copy_uses_chinese_units() {
-        assert!(freshness(SystemTime::now() - Duration::from_secs(2 * 3600)).contains("小时前更新"));
+        assert!(freshness(
+            SystemTime::now() - Duration::from_secs(2 * 3600),
+            Language::Chinese,
+        )
+        .contains("小时前更新"));
         assert_eq!(
-            reset_text(Some(SystemTime::now() + Duration::from_secs(5 * 3600 + 5))),
+            reset_text(
+                Some(SystemTime::now() + Duration::from_secs(5 * 3600 + 5)),
+                Language::Chinese,
+            ),
             "5 小时后重置"
         );
     }
@@ -1386,10 +1626,21 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_chinese_detail_at_80_by_8() {
+        let history = usage_history(&[&[71, 52, 33], &[70, 50, 32], &[68, 49, 31]]);
+        let mut app = app_with_codex_windows(&[68, 49, 31]);
+        app.set_language(Language::Chinese);
+        app.toggle_detail();
+        let backend = draw_with_history(&app, &history, 80, 8);
+        assert_snapshot!("chinese_detail_80x8", snapshot_text(&backend));
+    }
+
+    #[test]
     fn snapshot_stale_and_unavailable_at_60_by_6() {
         let codex = PlanIdentity::new("codex", "openai", "Codex");
         let claude = PlanIdentity::new("claude", "anthropic", "Claude");
         let mut app = App::new([codex.clone(), claude.clone()]);
+        app.set_language(Language::English);
         app.apply_event(PlanEvent::Fetched {
             identity: codex.clone(),
             result: Ok(plan("codex", "openai", "Codex", &[71, 52])),
@@ -1431,8 +1682,8 @@ mod tests {
 
         for (kind, title, action_fragment) in cases {
             let error = AdapterError::new(kind, "Claude statusline");
-            assert_eq!(diagnostic_title(kind), title);
-            assert!(diagnostic_action(error).contains(action_fragment));
+            assert_eq!(diagnostic_title(kind, Language::Chinese), title);
+            assert!(diagnostic_action(error, Language::Chinese).contains(action_fragment));
         }
     }
 
@@ -1440,6 +1691,7 @@ mod tests {
     fn unavailable_detail_shows_safe_reason_and_action() {
         let claude = PlanIdentity::new("claude", "anthropic", "Claude");
         let mut app = App::new([claude.clone()]);
+        app.set_language(Language::English);
         app.apply_event(PlanEvent::Fetched {
             identity: claude,
             result: Err(AdapterError::new(
@@ -1452,11 +1704,8 @@ mod tests {
         let backend = draw(&app, 80, 6);
         let rendered = (0..6).map(|y| text(&backend, y)).collect::<String>();
         let compact = rendered.replace(' ', "");
-        assert!(compact.contains("尚无用量快照"), "{rendered:?}");
-        assert!(
-            rendered.contains("limitdeck claude-statusline"),
-            "{rendered:?}"
-        );
+        assert!(compact.contains("Nousagesnapshotyet"), "{rendered:?}");
+        assert!(rendered.contains("limitdeck ingest claude"), "{rendered:?}");
         for forbidden in ["token", "stderr", "/Users/", "@"] {
             assert!(!rendered.contains(forbidden), "{rendered:?}");
         }

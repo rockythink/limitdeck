@@ -20,7 +20,7 @@ A compact, privacy-safe terminal dashboard for AI coding subscription limits.
 </p>
 
 <p align="center">
-  <img src="assets/limitdeck.gif" alt="LimitDeck showing Codex and Claude subscription limits in the Rainbow theme" width="800">
+  <img src="assets/limitdeck-en.gif" alt="LimitDeck showing Codex and Claude subscription limits in English" width="800">
 </p>
 
 ---
@@ -113,6 +113,11 @@ Claude Code provides `rate_limits` only for eligible subscriptions and only afte
 
 ## The interface
 
+### Languages
+
+LimitDeck reads the first non-empty value from `LC_ALL`, `LC_MESSAGES`, and `LANG` at startup. Chinese locales open in Chinese; every other locale opens in English. Press <kbd>l</kbd> to switch languages immediately for the current session.
+
+
 ### Themes
 
 Press <kbd>t</kbd> to cycle through:
@@ -134,6 +139,7 @@ Theme changes apply immediately to the list and detail views for the current ses
 | <kbd>Esc</kbd> | Return to the list, then exit |
 | <kbd>r</kbd> | Refresh sources |
 | <kbd>t</kbd> | Cycle themes |
+| <kbd>l</kbd> | Switch between English and Chinese |
 | <kbd>q</kbd> | Exit |
 
 The layout collapses to compact percentages in narrow terminals and keeps the selected plan visible when the list exceeds the viewport.
@@ -166,7 +172,7 @@ Diagnostics keep only a fixed source label and a safe failure category. Raw stde
 
 ## When a source cannot refresh
 
-A failing source stays visible. If a previous snapshot exists, LimitDeck marks it as cached; otherwise the row shows `不可用 · Enter 查看原因` (unavailable · press Enter for the reason).
+A failing source stays visible. If a previous snapshot exists, LimitDeck marks it as cached; otherwise the row shows `Unavailable · Enter for details`.
 
 | Reason | Next action |
 | --- | --- |

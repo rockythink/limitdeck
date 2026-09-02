@@ -325,13 +325,13 @@ fn push_window(
 
 fn period_label(period: Option<Duration>) -> String {
     let Some(period) = period else {
-        return "额度".to_owned();
+        return "Quota".to_owned();
     };
     let hours = period.as_secs() / 3600;
     if hours >= 24 && hours % 24 == 0 {
-        format!("{} 天", hours / 24)
+        format!("{} days", hours / 24)
     } else {
-        format!("{hours} 小时")
+        format!("{hours} hours")
     }
 }
 

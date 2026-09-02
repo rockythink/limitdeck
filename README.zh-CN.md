@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/limitdeck.gif" alt="LimitDeck 使用 Rainbow 主题展示 Codex 与 Claude 订阅额度" width="800">
+  <img src="assets/limitdeck-zh-CN.gif" alt="LimitDeck 以中文展示 Codex 与 Claude 订阅额度" width="800">
 </p>
 
 ---
@@ -113,6 +113,11 @@ Claude Code 通过官方 status-line 输入提供订阅限额。将以下配置�
 
 ## 界面
 
+### 语言
+
+LimitDeck 启动时会依次读取 `LC_ALL`、`LC_MESSAGES` 和 `LANG` 中第一个非空值。中文 locale 默认显示中文，其他 locale 默认显示英文。按 <kbd>l</kbd> 可在当前会话中立即切换语言。
+
+
 ### 主题
 
 按 <kbd>t</kbd> 循环切换：
@@ -134,6 +139,7 @@ Claude Code 通过官方 status-line 输入提供订阅限额。将以下配置�
 | <kbd>Esc</kbd> | 返回列表，再按一次退出 |
 | <kbd>r</kbd> | 刷新数据来源 |
 | <kbd>t</kbd> | 切换主题 |
+| <kbd>l</kbd> | 切换中文与英文 |
 | <kbd>q</kbd> | 退出 |
 
 窄终端会自动收缩为紧凑百分比布局；列表超过视口高度时，当前选择项始终保持可见。

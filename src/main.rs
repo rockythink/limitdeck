@@ -3,6 +3,7 @@ mod adapters;
 mod app;
 mod domain;
 mod history;
+mod locale;
 mod theme;
 mod ui;
 
@@ -55,7 +56,11 @@ fn main() -> ExitCode {
         Ok(Command::Dashboard) => match run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("LimitDeck 无法启动：{error}");
+                let message = match locale::Language::detect() {
+                    locale::Language::English => "LimitDeck could not start",
+                    locale::Language::Chinese => "LimitDeck 无法启动",
+                };
+                eprintln!("{message}: {error}");
                 ExitCode::FAILURE
             }
         },
@@ -169,6 +174,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
             }
             KeyCode::Char('t') => {
                 app.cycle_theme();
+                redraw = true;
+            }
+            KeyCode::Char('l') => {
+                app.cycle_language();
                 redraw = true;
             }
             KeyCode::Char('r') if !app.worker_disconnected() => {

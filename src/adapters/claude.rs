@@ -100,21 +100,21 @@ fn parse_statusline(input: &[u8], fetched_at: SystemTime) -> Result<CodingPlan, 
     push_window(
         &mut windows,
         "anthropic:five-hour",
-        "Claude · 5 小时",
+        "Claude · 5 hours",
         Some(Duration::from_secs(5 * 60 * 60)),
         limits.five_hour,
     );
     push_window(
         &mut windows,
         "anthropic:seven-day",
-        "Claude · 7 天",
+        "Claude · 7 days",
         Some(Duration::from_secs(7 * 24 * 60 * 60)),
         limits.seven_day,
     );
     push_window(
         &mut windows,
         "anthropic:spend-limit",
-        "Claude · 消费限额",
+        "Claude · Spend limit",
         None,
         limits.spend_limit,
     );

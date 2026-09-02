@@ -2,11 +2,11 @@
 source: src/ui.rs
 expression: snapshot_text(&backend)
 ---
-‹ Codex  刚 刚 更 新
-  普 通  Codex · 7 天              ━━━━━━───  71%  1 小 时 后 重 置
-    历 史 收 集 中
-  GPT-5.3-Codex-Spark · 5 小 时   ━━━━─────  52%  1 小 时 后 重 置
-    历 史 收 集 中
-  GPT-5.3-Codex-Spark · 7 天     ━━───────  33%  1 小 时 后 重 置
-    历 史 收 集 中
-  Esc 返 回  · r 刷 新  · t Rainbow · q 退 出
+‹ Codex  Updated just now
+  Codex · 7 days                 ━━──  71%  Resets in 1 hour
+    Collecting history
+  GPT-5.3-Codex-Spark · 5 hours  ━━──  52%  Resets in 1 hour
+    Collecting history
+  GPT-5.3-Codex-Spark · 7 days   ━───  33%  Resets in 1 hour
+    Collecting history
+  Esc Back · r Refresh · t Rainbow · l EN · q Quit

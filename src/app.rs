@@ -11,6 +11,7 @@ use std::{
 use crate::{
     adapter::{AdapterError, AdapterErrorKind, PlanAdapter},
     domain::{CodingPlan, PlanIdentity},
+    locale::Language,
     theme::Theme,
 };
 
@@ -92,6 +93,7 @@ pub struct App {
     selected: usize,
     detail_open: bool,
     theme: Theme,
+    language: Language,
     worker_disconnected: bool,
 }
 
@@ -108,6 +110,7 @@ impl App {
             selected: 0,
             detail_open: false,
             theme: Theme::default(),
+            language: Language::detect(),
             worker_disconnected: false,
         }
     }
@@ -136,6 +139,18 @@ impl App {
         self.theme = self.theme.next();
     }
 
+    pub fn language(&self) -> Language {
+        self.language
+    }
+
+    pub fn cycle_language(&mut self) {
+        self.language = self.language.next();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_language(&mut self, language: Language) {
+        self.language = language;
+    }
     pub fn select_next(&mut self) {
         if !self.plans.is_empty() {
             self.selected = (self.selected + 1) % self.plans.len();
@@ -433,6 +448,17 @@ mod tests {
         assert_eq!(app.theme(), Theme::Mono);
         app.cycle_theme();
         assert_eq!(app.theme(), Theme::Rainbow);
+    }
+
+    #[test]
+    fn language_cycle_switches_and_wraps() {
+        let mut app = App::new(std::iter::empty::<PlanIdentity>());
+        app.set_language(Language::English);
+        assert_eq!(app.language(), Language::English);
+        app.cycle_language();
+        assert_eq!(app.language(), Language::Chinese);
+        app.cycle_language();
+        assert_eq!(app.language(), Language::English);
     }
     #[test]
     fn worker_fetches_adapters_in_parallel() {
