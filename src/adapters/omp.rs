@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::{
-    io::Read,
+    io::{self, Read},
     process::{Command, Stdio},
     thread,
     time::{Duration, UNIX_EPOCH},
@@ -11,13 +11,31 @@ use serde::Deserialize;
 use wait_timeout::ChildExt;
 
 use crate::{
-    adapter::{AdapterError, PlanAdapter},
+    adapter::{AdapterError, AdapterErrorKind, PlanAdapter},
     domain::{CodingPlan, PlanIdentity, UsageStatus, UsageWindow},
 };
 
 const OMP_TIMEOUT: Duration = Duration::from_secs(15);
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+const SOURCE: &str = "OMP CLI";
+
+fn adapter_error(kind: AdapterErrorKind) -> AdapterError {
+    AdapterError::new(kind, SOURCE)
+}
+
+fn protocol_error() -> AdapterError {
+    adapter_error(AdapterErrorKind::ProtocolChanged)
+}
+
+fn spawn_error(error: &io::Error) -> AdapterError {
+    let kind = if error.kind() == io::ErrorKind::NotFound {
+        AdapterErrorKind::CommandNotFound
+    } else {
+        AdapterErrorKind::ProtocolChanged
+    };
+    adapter_error(kind)
+}
 
 pub struct OmpCodexAdapter;
 
@@ -54,10 +72,10 @@ fn run_command(program: &str, args: &[&str], timeout: Duration) -> Result<Vec<u8
     #[cfg(unix)]
     command.process_group(0);
 
-    let mut child = command.spawn().map_err(|_| AdapterError)?;
+    let mut child = command.spawn().map_err(|error| spawn_error(&error))?;
     let Some(stdout) = child.stdout.take() else {
         stop_child(&mut child);
-        return Err(AdapterError);
+        return Err(protocol_error());
     };
     let output_reader = thread::spawn(move || {
         let mut output = Vec::new();
@@ -65,7 +83,7 @@ fn run_command(program: &str, args: &[&str], timeout: Duration) -> Result<Vec<u8
             .take((MAX_OUTPUT_BYTES + 1) as u64)
             .read_to_end(&mut output)
             .map(|_| output)
-            .map_err(|_| AdapterError)
+            .map_err(|_| protocol_error())
     });
 
     let status = match child.wait_timeout(timeout) {
@@ -73,13 +91,16 @@ fn run_command(program: &str, args: &[&str], timeout: Duration) -> Result<Vec<u8
         Ok(None) | Err(_) => {
             stop_child(&mut child);
             let _ = output_reader.join();
-            return Err(AdapterError);
+            return Err(adapter_error(AdapterErrorKind::TimedOut));
         }
     };
-    let output = output_reader.join().map_err(|_| AdapterError)??;
+    let output = output_reader.join().map_err(|_| protocol_error())??;
 
-    if !status.success() || output.len() > MAX_OUTPUT_BYTES {
-        return Err(AdapterError);
+    if !status.success() {
+        return Err(adapter_error(AdapterErrorKind::NotAuthenticated));
+    }
+    if output.len() > MAX_OUTPUT_BYTES {
+        return Err(protocol_error());
     }
     Ok(output)
 }
@@ -126,8 +147,12 @@ struct SourceAmount {
 }
 
 pub(crate) fn parse_openai_codex(input: &[u8]) -> Result<CodingPlan, AdapterError> {
-    let response: UsageResponse = serde_json::from_slice(input).map_err(|_| AdapterError)?;
-    let report = response.reports.into_iter().next().ok_or(AdapterError)?;
+    let response: UsageResponse = serde_json::from_slice(input).map_err(|_| protocol_error())?;
+    let report = response
+        .reports
+        .into_iter()
+        .next()
+        .ok_or_else(protocol_error)?;
     let fetched_at = timestamp_millis(report.fetched_at)?;
     let windows = report
         .limits
@@ -150,7 +175,7 @@ pub(crate) fn parse_openai_codex(input: &[u8]) -> Result<CodingPlan, AdapterErro
         .collect::<Vec<_>>();
 
     if windows.is_empty() {
-        return Err(AdapterError);
+        return Err(protocol_error());
     }
 
     Ok(CodingPlan {
@@ -175,7 +200,7 @@ fn codex_period(id: &str) -> Option<Duration> {
 fn timestamp_millis(milliseconds: u64) -> Result<std::time::SystemTime, AdapterError> {
     UNIX_EPOCH
         .checked_add(Duration::from_millis(milliseconds))
-        .ok_or(AdapterError)
+        .ok_or_else(protocol_error)
 }
 
 #[cfg(test)]
@@ -216,7 +241,23 @@ mod tests {
         let started = std::time::Instant::now();
         let result = run_command("/bin/sh", &["-c", "sleep 2"], Duration::from_millis(25));
 
-        assert_eq!(result, Err(AdapterError));
+        assert_eq!(result, Err(adapter_error(AdapterErrorKind::TimedOut)));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_failures_have_actionable_categories() {
+        let missing = run_command("/definitely/missing/omp", &[], Duration::from_millis(25));
+        let logged_out = run_command("/bin/sh", &["-c", "exit 3"], Duration::from_secs(1));
+
+        assert_eq!(
+            missing,
+            Err(adapter_error(AdapterErrorKind::CommandNotFound))
+        );
+        assert_eq!(
+            logged_out,
+            Err(adapter_error(AdapterErrorKind::NotAuthenticated))
+        );
     }
 }

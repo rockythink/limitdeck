@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    io::{BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     process::{Child, Command, Stdio},
     sync::mpsc,
     thread,
@@ -11,13 +11,52 @@ use serde::Deserialize;
 use wait_timeout::ChildExt;
 
 use crate::{
-    adapter::{AdapterError, PlanAdapter},
+    adapter::{AdapterError, AdapterErrorKind, PlanAdapter},
     domain::{CodingPlan, PlanIdentity, UsageStatus, UsageWindow},
 };
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const SOURCE: &str = "Codex CLI";
+
+fn adapter_error(kind: AdapterErrorKind) -> AdapterError {
+    AdapterError::new(kind, SOURCE)
+}
+
+fn protocol_error() -> AdapterError {
+    adapter_error(AdapterErrorKind::ProtocolChanged)
+}
+
+fn spawn_error(error: &io::Error) -> AdapterError {
+    let kind = if error.kind() == io::ErrorKind::NotFound {
+        AdapterErrorKind::CommandNotFound
+    } else {
+        AdapterErrorKind::ProtocolChanged
+    };
+    adapter_error(kind)
+}
+
+fn classify_remote_error(message: &str) -> AdapterErrorKind {
+    const AUTH_MARKERS: [&str; 5] = ["auth", "login", "sign in", "credential", "unauthorized"];
+    if AUTH_MARKERS
+        .iter()
+        .any(|marker| contains_ascii_case_insensitive(message, marker))
+    {
+        AdapterErrorKind::NotAuthenticated
+    } else {
+        AdapterErrorKind::ProtocolChanged
+    }
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack.as_bytes().windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle.bytes())
+            .all(|(left, right)| left.eq_ignore_ascii_case(&right))
+    })
+}
 const INITIALIZE_MESSAGE: &str = concat!(
     r#"{"method":"initialize","id":1,"params":{"clientInfo":{"name":"limitdeck","title":"LimitDeck","version":""#,
     env!("CARGO_PKG_VERSION"),
@@ -49,14 +88,14 @@ fn fetch_from_app_server() -> Result<CodingPlan, AdapterError> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| AdapterError)?;
+        .map_err(|error| spawn_error(&error))?;
     let Some(mut stdin) = child.stdin.take() else {
         stop_child(&mut child);
-        return Err(AdapterError);
+        return Err(protocol_error());
     };
     let Some(stdout) = child.stdout.take() else {
         stop_child(&mut child);
-        return Err(AdapterError);
+        return Err(protocol_error());
     };
     let (messages, receiver) = mpsc::sync_channel(4);
     let reader = thread::spawn(move || {
@@ -84,11 +123,17 @@ fn fetch_from_app_server() -> Result<CodingPlan, AdapterError> {
         loop {
             let remaining = REQUEST_TIMEOUT
                 .checked_sub(started.elapsed())
-                .ok_or(AdapterError)?;
+                .ok_or_else(|| adapter_error(AdapterErrorKind::TimedOut))?;
             let line = receiver
                 .recv_timeout(remaining)
-                .map_err(|_| AdapterError)??;
-            let response: ResponseId = serde_json::from_str(&line).map_err(|_| AdapterError)?;
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Timeout => adapter_error(AdapterErrorKind::TimedOut),
+                    mpsc::RecvTimeoutError::Disconnected => protocol_error(),
+                })??;
+            let response: ResponseId = serde_json::from_str(&line).map_err(|_| protocol_error())?;
+            if let Some(remote_error) = response.error {
+                return Err(adapter_error(classify_remote_error(&remote_error.message)));
+            }
             match response.id {
                 Some(1) => {
                     write_message(&mut stdin, r#"{"method":"initialized","params":{}}"#)?;
@@ -113,22 +158,24 @@ fn read_bounded_line(reader: &mut impl BufRead) -> Result<Option<String>, Adapte
     let read = reader
         .take((MAX_MESSAGE_BYTES + 1) as u64)
         .read_until(b'\n', &mut bytes)
-        .map_err(|_| AdapterError)?;
+        .map_err(|_| protocol_error())?;
     if read == 0 {
         return Ok(None);
     }
     if bytes.len() > MAX_MESSAGE_BYTES {
-        return Err(AdapterError);
+        return Err(protocol_error());
     }
-    String::from_utf8(bytes).map(Some).map_err(|_| AdapterError)
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| protocol_error())
 }
 
 fn write_message(stdin: &mut impl Write, message: &str) -> Result<(), AdapterError> {
     stdin
         .write_all(message.as_bytes())
-        .map_err(|_| AdapterError)?;
-    stdin.write_all(b"\n").map_err(|_| AdapterError)?;
-    stdin.flush().map_err(|_| AdapterError)
+        .map_err(|_| protocol_error())?;
+    stdin.write_all(b"\n").map_err(|_| protocol_error())?;
+    stdin.flush().map_err(|_| protocol_error())
 }
 
 fn stop_child(child: &mut Child) {
@@ -158,6 +205,12 @@ fn command_succeeds(program: &str, args: &[&str], timeout: Duration) -> bool {
 #[derive(Deserialize)]
 struct ResponseId {
     id: Option<u64>,
+    error: Option<RpcError>,
+}
+
+#[derive(Deserialize)]
+struct RpcError {
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -193,11 +246,12 @@ fn parse_rate_limit_response(
     input: &[u8],
     fetched_at: SystemTime,
 ) -> Result<CodingPlan, AdapterError> {
-    let response: RateLimitRpcResponse = serde_json::from_slice(input).map_err(|_| AdapterError)?;
+    let response: RateLimitRpcResponse =
+        serde_json::from_slice(input).map_err(|_| protocol_error())?;
     if response.id != 2 {
-        return Err(AdapterError);
+        return Err(protocol_error());
     }
-    let response = response.result.ok_or(AdapterError)?;
+    let response = response.result.ok_or_else(protocol_error)?;
     let mut windows = Vec::new();
     let buckets = response
         .rate_limits_by_limit_id
@@ -228,7 +282,7 @@ fn parse_rate_limit_response(
         );
     }
     if windows.is_empty() {
-        return Err(AdapterError);
+        return Err(protocol_error());
     }
 
     Ok(CodingPlan {
@@ -316,7 +370,7 @@ mod tests {
         let input = vec![b'x'; MAX_MESSAGE_BYTES + 1];
         let mut reader = BufReader::new(input.as_slice());
 
-        assert_eq!(read_bounded_line(&mut reader), Err(AdapterError));
+        assert_eq!(read_bounded_line(&mut reader), Err(protocol_error()));
     }
 
     #[test]
@@ -327,5 +381,15 @@ mod tests {
 
         assert_eq!(plan.windows.len(), 1);
         assert_eq!(plan.windows[0].remaining_percent, 90);
+    }
+
+    #[test]
+    fn remote_auth_errors_are_classified_without_retaining_the_message() {
+        let secret = "Unauthorized for private@example.com with token sk-secret";
+        let kind = classify_remote_error(secret);
+        let error = adapter_error(kind);
+
+        assert_eq!(error.kind, AdapterErrorKind::NotAuthenticated);
+        assert!(!format!("{error:?}").contains(secret));
     }
 }

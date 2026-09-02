@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::{
-    adapter::{AdapterError, PlanAdapter},
+    adapter::{AdapterError, AdapterErrorKind, PlanAdapter},
     domain::{CodingPlan, PlanIdentity},
 };
 
@@ -29,6 +29,7 @@ pub struct PlanState {
     pub identity: PlanIdentity,
     pub plan: Option<CodingPlan>,
     pub phase: PlanPhase,
+    pub error: Option<AdapterError>,
 }
 
 impl PlanState {
@@ -37,6 +38,7 @@ impl PlanState {
             identity,
             plan: None,
             phase: PlanPhase::Loading,
+            error: None,
         }
     }
 
@@ -46,6 +48,7 @@ impl PlanState {
         } else {
             PlanPhase::Loading
         };
+        self.error = None;
     }
 
     fn apply(&mut self, result: Result<CodingPlan, AdapterError>) {
@@ -53,21 +56,33 @@ impl PlanState {
             Ok(plan)
                 if plan.id == self.identity.id && plan.provider_id == self.identity.provider_id =>
             {
-                self.phase = if plan.is_older_than(MAX_SNAPSHOT_AGE) {
+                let expired = plan.is_older_than(MAX_SNAPSHOT_AGE);
+                self.phase = if expired {
                     PlanPhase::Stale
                 } else {
                     PlanPhase::Ready
                 };
+                self.error = expired.then_some(AdapterError::new(
+                    AdapterErrorKind::SnapshotExpired,
+                    "LimitDeck cache",
+                ));
                 self.plan = Some(plan);
             }
-            Ok(_) | Err(_) => {
-                self.phase = if self.plan.is_some() {
-                    PlanPhase::Stale
-                } else {
-                    PlanPhase::Unavailable
-                };
-            }
+            Ok(_) => self.fail(AdapterError::new(
+                AdapterErrorKind::ProtocolChanged,
+                "LimitDeck adapter",
+            )),
+            Err(error) => self.fail(error),
         }
+    }
+
+    fn fail(&mut self, error: AdapterError) {
+        self.phase = if self.plan.is_some() {
+            PlanPhase::Stale
+        } else {
+            PlanPhase::Unavailable
+        };
+        self.error = Some(error);
     }
 }
 
@@ -155,7 +170,10 @@ impl App {
         self.worker_disconnected = true;
         for plan in &mut self.plans {
             if matches!(plan.phase, PlanPhase::Loading | PlanPhase::Refreshing) {
-                plan.apply(Err(AdapterError));
+                plan.apply(Err(AdapterError::new(
+                    AdapterErrorKind::ProtocolChanged,
+                    "LimitDeck worker",
+                )));
             }
         }
     }
@@ -279,11 +297,22 @@ mod tests {
         });
         app.apply_event(PlanEvent::Fetched {
             identity: second,
-            result: Err(AdapterError),
+            result: Err(AdapterError::new(
+                AdapterErrorKind::TimedOut,
+                "test adapter",
+            )),
         });
 
         assert_eq!(app.plans()[0].phase, PlanPhase::Ready);
+        assert_eq!(app.plans()[0].error, None);
         assert_eq!(app.plans()[1].phase, PlanPhase::Unavailable);
+        assert_eq!(
+            app.plans()[1].error,
+            Some(AdapterError::new(
+                AdapterErrorKind::TimedOut,
+                "test adapter",
+            ))
+        );
     }
 
     #[test]
@@ -297,11 +326,21 @@ mod tests {
         app.start_refresh();
         app.apply_event(PlanEvent::Fetched {
             identity,
-            result: Err(AdapterError),
+            result: Err(AdapterError::new(
+                AdapterErrorKind::TimedOut,
+                "test adapter",
+            )),
         });
 
         assert_eq!(app.plans()[0].phase, PlanPhase::Stale);
         assert!(app.plans()[0].plan.is_some());
+        assert_eq!(
+            app.plans()[0].error,
+            Some(AdapterError::new(
+                AdapterErrorKind::TimedOut,
+                "test adapter",
+            ))
+        );
     }
 
     #[test]
@@ -318,6 +357,39 @@ mod tests {
         });
 
         assert_eq!(app.plans()[0].phase, PlanPhase::Stale);
+        assert_eq!(
+            app.plans()[0].error,
+            Some(AdapterError::new(
+                AdapterErrorKind::SnapshotExpired,
+                "LimitDeck cache",
+            ))
+        );
+    }
+
+    #[test]
+    fn refresh_clears_old_diagnostic_and_fresh_success_stays_clear() {
+        let identity = PlanIdentity::new("first", "openai", "First");
+        let mut app = App::new([identity.clone()]);
+        app.apply_event(PlanEvent::Fetched {
+            identity: identity.clone(),
+            result: Err(AdapterError::new(
+                AdapterErrorKind::NotAuthenticated,
+                "test adapter",
+            )),
+        });
+        assert_eq!(app.plans()[0].phase, PlanPhase::Unavailable);
+        assert!(app.plans()[0].error.is_some());
+
+        app.start_refresh();
+        assert_eq!(app.plans()[0].phase, PlanPhase::Loading);
+        assert_eq!(app.plans()[0].error, None);
+
+        app.apply_event(PlanEvent::Fetched {
+            identity,
+            result: Ok(plan("first", "openai", SystemTime::now())),
+        });
+        assert_eq!(app.plans()[0].phase, PlanPhase::Ready);
+        assert_eq!(app.plans()[0].error, None);
     }
 
     #[test]

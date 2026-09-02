@@ -8,11 +8,29 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    adapter::{AdapterError, PlanAdapter},
+    adapter::{AdapterError, AdapterErrorKind, PlanAdapter},
     domain::{CodingPlan, PlanIdentity, UsageStatus, UsageWindow},
 };
 
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
+const SOURCE: &str = "Claude statusline";
+
+fn adapter_error(kind: AdapterErrorKind) -> AdapterError {
+    AdapterError::new(kind, SOURCE)
+}
+
+fn protocol_error() -> AdapterError {
+    adapter_error(AdapterErrorKind::ProtocolChanged)
+}
+
+fn snapshot_open_error(error: &io::Error) -> AdapterError {
+    let kind = if error.kind() == io::ErrorKind::NotFound {
+        AdapterErrorKind::SnapshotMissing
+    } else {
+        AdapterErrorKind::ProtocolChanged
+    };
+    adapter_error(kind)
+}
 
 pub struct ClaudeStatuslineAdapter {
     cache_path: PathBuf,
@@ -45,12 +63,12 @@ pub fn ingest_stdin() -> Result<String, AdapterError> {
     io::stdin()
         .take((MAX_INPUT_BYTES + 1) as u64)
         .read_to_end(&mut input)
-        .map_err(|_| AdapterError)?;
+        .map_err(|_| protocol_error())?;
     if input.len() > MAX_INPUT_BYTES {
-        return Err(AdapterError);
+        return Err(protocol_error());
     }
     let plan = parse_statusline(&input, SystemTime::now())?;
-    let path = cache_path().ok_or(AdapterError)?;
+    let path = cache_path().ok_or_else(|| adapter_error(AdapterErrorKind::SnapshotMissing))?;
     write_cache(&path, &plan)?;
     Ok(compact_statusline(&plan))
 }
@@ -74,8 +92,10 @@ struct RateLimitWindow {
 }
 
 fn parse_statusline(input: &[u8], fetched_at: SystemTime) -> Result<CodingPlan, AdapterError> {
-    let input: StatuslineInput = serde_json::from_slice(input).map_err(|_| AdapterError)?;
-    let limits = input.rate_limits.ok_or(AdapterError)?;
+    let input: StatuslineInput = serde_json::from_slice(input).map_err(|_| protocol_error())?;
+    let limits = input
+        .rate_limits
+        .ok_or_else(|| adapter_error(AdapterErrorKind::NotAuthenticated))?;
     let mut windows = Vec::with_capacity(4);
     push_window(
         &mut windows,
@@ -99,7 +119,7 @@ fn parse_statusline(input: &[u8], fetched_at: SystemTime) -> Result<CodingPlan, 
         limits.spend_limit,
     );
     if windows.is_empty() {
-        return Err(AdapterError);
+        return Err(protocol_error());
     }
 
     Ok(CodingPlan {
@@ -152,8 +172,8 @@ struct CachedWindow {
 }
 
 fn write_cache(path: &Path, plan: &CodingPlan) -> Result<(), AdapterError> {
-    let parent = path.parent().ok_or(AdapterError)?;
-    fs::create_dir_all(parent).map_err(|_| AdapterError)?;
+    let parent = path.parent().ok_or_else(protocol_error)?;
+    fs::create_dir_all(parent).map_err(|_| protocol_error())?;
     let cached = CachedPlan {
         fetched_at_millis: system_time_millis(plan.fetched_at)?,
         windows: plan
@@ -171,28 +191,28 @@ fn write_cache(path: &Path, plan: &CodingPlan) -> Result<(), AdapterError> {
             })
             .collect::<Result<Vec<_>, AdapterError>>()?,
     };
-    let encoded = serde_json::to_vec(&cached).map_err(|_| AdapterError)?;
+    let encoded = serde_json::to_vec(&cached).map_err(|_| protocol_error())?;
     let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    fs::write(&temporary, encoded).map_err(|_| AdapterError)?;
+    fs::write(&temporary, encoded).map_err(|_| protocol_error())?;
     fs::rename(&temporary, path).map_err(|_| {
         let _ = fs::remove_file(&temporary);
-        AdapterError
+        protocol_error()
     })
 }
 
 fn read_cache(path: &Path) -> Result<CodingPlan, AdapterError> {
     let mut encoded = Vec::new();
     fs::File::open(path)
-        .map_err(|_| AdapterError)?
+        .map_err(|error| snapshot_open_error(&error))?
         .take((MAX_INPUT_BYTES + 1) as u64)
         .read_to_end(&mut encoded)
-        .map_err(|_| AdapterError)?;
+        .map_err(|_| protocol_error())?;
     if encoded.len() > MAX_INPUT_BYTES {
-        return Err(AdapterError);
+        return Err(protocol_error());
     }
-    let cached: CachedPlan = serde_json::from_slice(&encoded).map_err(|_| AdapterError)?;
+    let cached: CachedPlan = serde_json::from_slice(&encoded).map_err(|_| protocol_error())?;
     if cached.windows.is_empty() {
-        return Err(AdapterError);
+        return Err(protocol_error());
     }
     Ok(CodingPlan {
         id: "anthropic-claude".to_owned(),
@@ -260,15 +280,15 @@ fn cache_path() -> Option<PathBuf> {
 fn system_time_millis(value: SystemTime) -> Result<u64, AdapterError> {
     let millis = value
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| AdapterError)?
+        .map_err(|_| protocol_error())?
         .as_millis();
-    u64::try_from(millis).map_err(|_| AdapterError)
+    u64::try_from(millis).map_err(|_| protocol_error())
 }
 
 fn timestamp_millis(milliseconds: u64) -> Result<SystemTime, AdapterError> {
     UNIX_EPOCH
         .checked_add(Duration::from_millis(milliseconds))
-        .ok_or(AdapterError)
+        .ok_or_else(protocol_error)
 }
 
 #[cfg(test)]
@@ -308,7 +328,7 @@ mod tests {
         let path = env::temp_dir().join(format!("limitdeck-oversized-{unique}.json"));
         fs::write(&path, vec![b'x'; MAX_INPUT_BYTES + 1]).unwrap();
 
-        assert_eq!(read_cache(&path), Err(AdapterError));
+        assert_eq!(read_cache(&path), Err(protocol_error()));
         let _ = fs::remove_file(path);
     }
 
@@ -330,5 +350,14 @@ mod tests {
 
         assert_eq!(loaded, plan);
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn missing_rate_limits_means_claude_is_not_authenticated() {
+        let error = parse_statusline(br#"{"session_id":"secret"}"#, SystemTime::now())
+            .expect_err("statusline without rate limits must not look healthy");
+
+        assert_eq!(error.kind, AdapterErrorKind::NotAuthenticated);
+        assert!(!format!("{error:?}").contains("secret"));
     }
 }

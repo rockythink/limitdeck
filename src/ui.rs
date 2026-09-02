@@ -10,6 +10,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
+    adapter::{AdapterError, AdapterErrorKind},
     app::{App, PlanPhase, PlanState},
     domain::{UsageStatus, UsageWindow},
     history::{HistorySample, UsageHistory},
@@ -365,6 +366,35 @@ fn render_detail(
     );
 
     let mut next_y = 1;
+    if let Some(error) = state.error {
+        if next_y < area.height {
+            let reason = format!("原因  {} · {}", error.source, diagnostic_title(error.kind));
+            render_line(
+                frame,
+                row(area, next_y),
+                vec![Span::styled(
+                    fit_display_width(&reason, usize::from(area.width)),
+                    Style::default().fg(palette.warning),
+                )],
+                palette.background,
+            );
+            next_y += 1;
+        }
+        if next_y < area.height {
+            let action = format!("处理  {}", diagnostic_action(error));
+            render_line(
+                frame,
+                row(area, next_y),
+                vec![Span::styled(
+                    fit_display_width(&action, usize::from(area.width)),
+                    Style::default().fg(palette.muted),
+                )],
+                palette.background,
+            );
+            next_y += 1;
+        }
+    }
+
     if let Some(plan) = &state.plan {
         let detail_label_width = plan
             .windows
@@ -379,8 +409,9 @@ fn render_detail(
             .map(|window| reset_text(window.resets_at).width())
             .max()
             .unwrap_or(0);
-        let show_trends = area.width >= 40
-            && usize::from(area.height.saturating_sub(1)) >= plan.windows.len().saturating_mul(2);
+        let available_rows = usize::from(area.height.saturating_sub(next_y));
+        let show_trends =
+            area.width >= 40 && available_rows >= plan.windows.len().saturating_mul(2);
         for window in &plan.windows {
             if next_y >= area.height {
                 break;
@@ -408,7 +439,7 @@ fn render_detail(
                 next_y += 1;
             }
         }
-    } else if next_y < area.height {
+    } else if state.error.is_none() && next_y < area.height {
         render_line(
             frame,
             row(area, next_y),
@@ -418,6 +449,39 @@ fn render_detail(
             )],
             palette.background,
         );
+    }
+}
+
+fn diagnostic_title(kind: AdapterErrorKind) -> &'static str {
+    match kind {
+        AdapterErrorKind::CommandNotFound => "未找到来源命令",
+        AdapterErrorKind::NotAuthenticated => "来源尚未登录",
+        AdapterErrorKind::TimedOut => "来源响应超时",
+        AdapterErrorKind::ProtocolChanged => "来源数据格式已变化",
+        AdapterErrorKind::SnapshotMissing => "尚无用量快照",
+        AdapterErrorKind::SnapshotExpired => "缓存快照已过期",
+    }
+}
+
+fn diagnostic_action(error: AdapterError) -> String {
+    match error.kind {
+        AdapterErrorKind::CommandNotFound => {
+            format!("安装 {}，确认命令已加入 PATH，然后按 r 重试", error.source)
+        }
+        AdapterErrorKind::NotAuthenticated => {
+            format!("登录 {}，然后按 r 重试", error.source)
+        }
+        AdapterErrorKind::TimedOut => "检查网络连接，稍后按 r 重试".to_owned(),
+        AdapterErrorKind::ProtocolChanged => "升级 LimitDeck；若仍失败，请提交 issue".to_owned(),
+        AdapterErrorKind::SnapshotMissing if error.source == "Claude statusline" => {
+            "配置 Claude statusLine 使用 limitdeck claude-statusline，然后按 r 重试".to_owned()
+        }
+        AdapterErrorKind::SnapshotMissing => {
+            format!("先运行 {} 生成快照，然后按 r 重试", error.source)
+        }
+        AdapterErrorKind::SnapshotExpired => {
+            format!("刷新 {}，然后按 r 重试", error.source)
+        }
     }
 }
 
@@ -713,7 +777,7 @@ fn phase_text(phase: PlanPhase) -> &'static str {
         PlanPhase::Refreshing => "↻",
         PlanPhase::Ready => "",
         PlanPhase::Stale => "缓存",
-        PlanPhase::Unavailable => "不可用",
+        PlanPhase::Unavailable => "不可用 · Enter 查看原因",
     }
 }
 
@@ -758,6 +822,8 @@ mod tests {
         domain::{CodingPlan, PlanIdentity},
     };
     use ratatui::{backend::TestBackend, Terminal};
+
+    use insta::assert_snapshot;
 
     fn plan(id: &str, provider_id: &str, display_name: &str, values: &[u8]) -> CodingPlan {
         CodingPlan {
@@ -835,6 +901,22 @@ mod tests {
         (0..backend.buffer().area.width)
             .map(|x| backend.buffer().cell((x, y)).unwrap().symbol())
             .collect::<String>()
+    }
+    fn snapshot_text(backend: &TestBackend) -> String {
+        (0..backend.buffer().area.height)
+            .map(|y| text(backend, y).trim_end().to_owned())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn usage_history(values: &[&[u8]]) -> UsageHistory {
+        let mut history = UsageHistory::empty();
+        for (index, values) in values.iter().enumerate() {
+            let mut snapshot = plan("codex", "openai", "Codex", values);
+            snapshot.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(index as u64 + 1);
+            history.record(&snapshot).unwrap();
+        }
+        history
     }
 
     fn contains_braille(value: &str) -> bool {
@@ -994,7 +1076,10 @@ mod tests {
         });
         app.apply_event(PlanEvent::Fetched {
             identity: second,
-            result: Err(crate::adapter::AdapterError),
+            result: Err(AdapterError::new(
+                AdapterErrorKind::TimedOut,
+                "Claude statusline",
+            )),
         });
         let backend = draw(&app, 60, 2);
         assert!(text(&backend, 0).contains("71%"));
@@ -1170,5 +1255,119 @@ mod tests {
             reset_text(Some(SystemTime::now() + Duration::from_secs(5 * 3600 + 5))),
             "5 小时后重置"
         );
+    }
+    #[test]
+    fn snapshot_normal_list_at_80_by_8() {
+        let backend = draw(&populated_app(), 80, 8);
+        assert_snapshot!("normal_list_80x8", snapshot_text(&backend));
+    }
+
+    #[test]
+    fn snapshot_narrow_list_at_40_by_5() {
+        let backend = draw(&app_with_codex_windows(&[71, 52, 33]), 40, 5);
+        assert_snapshot!("narrow_list_40x5", snapshot_text(&backend));
+    }
+
+    #[test]
+    fn snapshot_three_window_detail_at_60_by_8() {
+        let mut app = app_with_codex_windows(&[71, 52, 33]);
+        app.toggle_detail();
+        let backend = draw(&app, 60, 8);
+        assert_snapshot!("three_window_detail_60x8", snapshot_text(&backend));
+    }
+
+    #[test]
+    fn snapshot_braille_trend_at_80_by_8() {
+        let history = usage_history(&[&[71, 52, 33], &[70, 50, 32], &[68, 49, 31]]);
+        let mut app = app_with_codex_windows(&[68, 49, 31]);
+        app.toggle_detail();
+        let backend = draw_with_history(&app, &history, 80, 8);
+        assert_snapshot!("braille_trend_80x8", snapshot_text(&backend));
+    }
+
+    #[test]
+    fn snapshot_flat_history_at_80_by_8() {
+        let history = usage_history(&[&[71, 52, 33], &[71, 52, 33], &[71, 52, 33]]);
+        let mut app = app_with_codex_windows(&[71, 52, 33]);
+        app.toggle_detail();
+        let backend = draw_with_history(&app, &history, 80, 8);
+        assert_snapshot!("flat_history_80x8", snapshot_text(&backend));
+    }
+
+    #[test]
+    fn snapshot_stale_and_unavailable_at_60_by_6() {
+        let codex = PlanIdentity::new("codex", "openai", "Codex");
+        let claude = PlanIdentity::new("claude", "anthropic", "Claude");
+        let mut app = App::new([codex.clone(), claude.clone()]);
+        app.apply_event(PlanEvent::Fetched {
+            identity: codex.clone(),
+            result: Ok(plan("codex", "openai", "Codex", &[71, 52])),
+        });
+        app.apply_event(PlanEvent::Fetched {
+            identity: codex,
+            result: Err(AdapterError::new(AdapterErrorKind::TimedOut, "Codex CLI")),
+        });
+        app.apply_event(PlanEvent::Fetched {
+            identity: claude,
+            result: Err(AdapterError::new(
+                AdapterErrorKind::SnapshotMissing,
+                "Claude statusline",
+            )),
+        });
+
+        let backend = draw(&app, 60, 6);
+        assert_snapshot!("stale_and_unavailable_60x6", snapshot_text(&backend));
+    }
+
+    #[test]
+    fn diagnostic_copy_covers_every_safe_error_kind() {
+        let cases = [
+            (AdapterErrorKind::CommandNotFound, "未找到来源命令", "PATH"),
+            (AdapterErrorKind::NotAuthenticated, "来源尚未登录", "登录"),
+            (AdapterErrorKind::TimedOut, "来源响应超时", "网络"),
+            (
+                AdapterErrorKind::ProtocolChanged,
+                "来源数据格式已变化",
+                "升级",
+            ),
+            (
+                AdapterErrorKind::SnapshotMissing,
+                "尚无用量快照",
+                "statusLine",
+            ),
+            (AdapterErrorKind::SnapshotExpired, "缓存快照已过期", "刷新"),
+        ];
+
+        for (kind, title, action_fragment) in cases {
+            let error = AdapterError::new(kind, "Claude statusline");
+            assert_eq!(diagnostic_title(kind), title);
+            assert!(diagnostic_action(error).contains(action_fragment));
+        }
+    }
+
+    #[test]
+    fn unavailable_detail_shows_safe_reason_and_action() {
+        let claude = PlanIdentity::new("claude", "anthropic", "Claude");
+        let mut app = App::new([claude.clone()]);
+        app.apply_event(PlanEvent::Fetched {
+            identity: claude,
+            result: Err(AdapterError::new(
+                AdapterErrorKind::SnapshotMissing,
+                "Claude statusline",
+            )),
+        });
+        app.toggle_detail();
+
+        let backend = draw(&app, 80, 6);
+        let rendered = (0..6).map(|y| text(&backend, y)).collect::<String>();
+        let compact = rendered.replace(' ', "");
+        assert!(compact.contains("尚无用量快照"), "{rendered:?}");
+        assert!(
+            rendered.contains("limitdeck claude-statusline"),
+            "{rendered:?}"
+        );
+        for forbidden in ["token", "stderr", "/Users/", "@"] {
+            assert!(!rendered.contains(forbidden), "{rendered:?}");
+        }
     }
 }

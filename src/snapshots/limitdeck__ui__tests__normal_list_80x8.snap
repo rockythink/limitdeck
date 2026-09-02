@@ -1,0 +1,12 @@
+---
+source: src/ui.rs
+expression: snapshot_text(&backend)
+---
+› Codex     7d ━━━━━───  71% 5h ━━━━────  52%
+  Claude    5h ━━━━━───  63% 7d ━━━━━━──  82%
+
+
+
+
+
+  ↑↓/jk 选 择  · Enter 详 情  · r 刷 新  · q 退 出

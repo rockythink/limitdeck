@@ -84,6 +84,22 @@ The layout degrades to compact percentages in narrow terminals and keeps the sel
 
 Open a plan to see locally sampled quota history when the terminal has enough rows. A changing current-cycle history with at least three samples is rendered as a compact Braille line with its actual time span, start and end values, and delta; flat or sparse history stays textual instead of drawing a misleading bar. A quota increase starts a new visual cycle. History is stored at `$XDG_CACHE_HOME/limitdeck/history.json`, or `~/.cache/limitdeck/history.json` when `XDG_CACHE_HOME` is unset. LimitDeck keeps at most 30 days and 2,048 samples per quota window; after the first two real samples, unchanged values are sampled no more than once every 15 minutes.
 
+## Troubleshooting
+
+A source that cannot refresh stays visible. If a previous snapshot exists, LimitDeck marks it as cached; otherwise the row shows `不可用 · Enter 查看原因` (unavailable · press Enter for the reason). Press `Enter` to see the safe failure category and the next action:
+
+| Reason | Action |
+| --- | --- |
+| Source command missing | Install the named CLI, confirm it is on `PATH`, then press `r` |
+| Not authenticated | Log in to the named source, then press `r` |
+| Timed out | Check the network and retry with `r` |
+| Provider protocol changed | Upgrade LimitDeck; open an issue if the failure remains |
+| Claude snapshot missing | Configure `limitdeck ingest claude` as the Claude Code status line |
+| Cached snapshot expired | Refresh the source with `r` |
+
+Diagnostics retain and display only a fixed source label and a failure category. Raw stderr, provider payloads, credentials, account fields, email addresses, and local paths are never retained in application state.
+
+
 ## Privacy model
 
 LimitDeck retains only:
