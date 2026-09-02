@@ -2,7 +2,7 @@
 source: src/ui.rs
 expression: snapshot_text(&backend)
 ---
-› Codex     7d ━━━━━───  71% 5h ━━━━────  52%
+› Codex      7d Q ━─  71% T ──   1%  5h Q ━─  52% T ━─  40%
   Claude   Unavailable · Enter for details
 
 

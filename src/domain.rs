@@ -37,6 +37,25 @@ pub struct UsageWindow {
     pub status: UsageStatus,
 }
 
+impl UsageWindow {
+    pub fn remaining_time_percent_at(&self, now: SystemTime) -> Option<u8> {
+        let period = self.period?;
+        let resets_at = self.resets_at?;
+        if period.is_zero() {
+            return None;
+        }
+
+        let remaining = resets_at.duration_since(now).unwrap_or(Duration::ZERO);
+        let period_nanos = period.as_nanos();
+        let rounded = remaining
+            .as_nanos()
+            .saturating_mul(100)
+            .saturating_add(period_nanos / 2)
+            / period_nanos;
+        Some(rounded.min(100) as u8)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodingPlan {
     pub id: String,
@@ -52,5 +71,55 @@ impl CodingPlan {
             .duration_since(self.fetched_at)
             .map(|age| age > max_age)
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(period: Option<Duration>, resets_at: Option<SystemTime>) -> UsageWindow {
+        UsageWindow {
+            id: "test".to_owned(),
+            label: "Test".to_owned(),
+            period,
+            remaining_percent: 50,
+            resets_at,
+            status: UsageStatus::Available,
+        }
+    }
+
+    #[test]
+    fn remaining_time_percent_matches_the_same_remaining_scale_as_quota() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let period = Duration::from_secs(100);
+        assert_eq!(
+            window(Some(period), Some(now + Duration::from_secs(50)))
+                .remaining_time_percent_at(now),
+            Some(50)
+        );
+        assert_eq!(
+            window(Some(period), Some(now - Duration::from_secs(1))).remaining_time_percent_at(now),
+            Some(0)
+        );
+        assert_eq!(
+            window(Some(period), Some(now + Duration::from_secs(120)))
+                .remaining_time_percent_at(now),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn remaining_time_percent_requires_a_nonzero_period_and_reset_time() {
+        let now = SystemTime::UNIX_EPOCH;
+        assert_eq!(window(None, Some(now)).remaining_time_percent_at(now), None);
+        assert_eq!(
+            window(Some(Duration::from_secs(1)), None).remaining_time_percent_at(now),
+            None
+        );
+        assert_eq!(
+            window(Some(Duration::ZERO), Some(now)).remaining_time_percent_at(now),
+            None
+        );
     }
 }

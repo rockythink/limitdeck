@@ -1,6 +1,6 @@
 [package]
 name = "limitdeck"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 rust-version = "1.88"
 description = "A privacy-safe terminal dashboard for AI subscription limits"

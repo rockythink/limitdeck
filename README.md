@@ -118,6 +118,15 @@ Claude Code provides `rate_limits` only for eligible subscriptions and only afte
 LimitDeck reads the first non-empty value from `LC_ALL`, `LC_MESSAGES`, and `LANG` at startup. Chinese locales open in Chinese; every other locale opens in English. Press <kbd>l</kbd> to switch languages immediately for the current session.
 
 
+### Quota and time
+
+Every reset window places two remaining percentages on the same 100-to-0 scale:
+
+- **Q / Quota** — quota remaining.
+- **T / Time** — time remaining until reset, divided by the window's full duration.
+
+The list and detail views present these measurements side by side. LimitDeck does not classify usage or recommend what to do.
+
 ### Themes
 
 Press <kbd>t</kbd> to cycle through:
@@ -142,7 +151,7 @@ Theme changes apply immediately to the list and detail views for the current ses
 | <kbd>l</kbd> | Switch between English and Chinese |
 | <kbd>q</kbd> | Exit |
 
-The layout collapses to compact percentages in narrow terminals and keeps the selected plan visible when the list exceeds the viewport.
+The layout collapses to compact quota/time comparisons in narrow terminals and keeps the selected plan visible when the list exceeds the viewport.
 
 ### Local quota history
 

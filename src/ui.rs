@@ -20,6 +20,7 @@ use crate::{
 
 const FILLED_BAR_GLYPH: &str = "━";
 const EMPTY_BAR_GLYPH: &str = "─";
+const LIST_PERIOD_WIDTH: usize = 3;
 
 pub fn render(frame: &mut Frame<'_>, app: &App, history: &UsageHistory) {
     let area = frame.area();
@@ -224,11 +225,10 @@ fn stacked_plan_rows(
 ) -> Vec<Vec<Span<'static>>> {
     let accent = provider_accent(&state.identity.provider_id, palette);
     let name_width = 9usize;
-    let model_width = 8usize;
+    let model_width = 7usize;
     let prefix_width = 2 + name_width;
-    let bar_width = usize::from(width)
-        .saturating_sub(prefix_width + model_width + 11)
-        .clamp(6, 24);
+    let bar_width = comparison_bar_width(width, prefix_width + model_width, 1)
+        .expect("stacked comparison rows require enough width");
     let plan = state.plan.as_ref().expect("stacked rows require a plan");
 
     plan.windows
@@ -257,13 +257,25 @@ fn stacked_plan_rows(
             let period = period_label(window.period, language);
             spans.push(Span::styled(
                 if window.period.is_some() {
-                    format!(" {period:>4} ")
+                    format!(" {} ", pad_left_display(&period, LIST_PERIOD_WIDTH),)
                 } else {
-                    format!(" {} ", language.copy().quota)
+                    format!(
+                        " {} ",
+                        pad_left_display(language.copy().quota, LIST_PERIOD_WIDTH),
+                    )
                 },
                 Style::default().fg(palette.muted),
             ));
-            push_bar(&mut spans, window, bar_width, row_accent, palette);
+            let copy = language.copy();
+            push_comparison_bars(
+                &mut spans,
+                window,
+                bar_width,
+                copy.quota_short,
+                copy.time_short,
+                row_accent,
+                palette,
+            );
 
             let phase = phase_text(state.phase, language);
             if index == 0 && !phase.is_empty() && width >= 64 {
@@ -303,28 +315,51 @@ fn plan_row(
         return spans;
     };
 
-    if plan.windows.len() > 2 || width < 32 || !room_for_bars(width, name_width, plan.windows.len())
-    {
-        for (index, window) in plan.windows.iter().enumerate() {
-            if index > 0 {
-                spans.push(Span::styled("/", Style::default().fg(palette.muted)));
+    let comparison_width = comparison_bar_width(width, 2 + name_width, plan.windows.len());
+    if plan.windows.len() > 2 || width < 32 || comparison_width.is_none() {
+        let copy = language.copy();
+        let comparisons = plan
+            .windows
+            .iter()
+            .map(|window| compact_comparison(window, copy))
+            .collect::<Vec<_>>();
+        let comparison_width = comparisons.iter().map(|value| value.width()).sum::<usize>()
+            + comparisons.len().saturating_sub(1)
+            + 2
+            + name_width;
+        if comparison_width <= usize::from(width) {
+            for (index, comparison) in comparisons.into_iter().enumerate() {
+                if index > 0 {
+                    spans.push(Span::styled("/", Style::default().fg(palette.muted)));
+                }
+                spans.push(Span::styled(comparison, Style::default().fg(palette.text)));
             }
-            spans.push(Span::styled(
-                compact_percent(window),
-                Style::default().fg(percent_color(window, palette)),
-            ));
+        } else {
+            for (index, window) in plan.windows.iter().enumerate() {
+                if index > 0 {
+                    spans.push(Span::styled("/", Style::default().fg(palette.muted)));
+                }
+                spans.push(Span::styled(
+                    compact_percent(window),
+                    Style::default().fg(percent_color(window, palette)),
+                ));
+            }
         }
     } else {
-        let bar_width = bar_width(width, name_width, plan.windows.len());
+        let bar_width = comparison_width.unwrap_or(1);
+        let copy = language.copy();
         for window in &plan.windows {
+            let period = period_label(window.period, language);
             spans.push(Span::styled(
-                format!(" {} ", period_label(window.period, language)),
+                format!(" {} ", pad_left_display(&period, LIST_PERIOD_WIDTH),),
                 Style::default().fg(palette.muted),
             ));
-            push_bar(
+            push_comparison_bars(
                 &mut spans,
                 window,
                 bar_width,
+                copy.quota_short,
+                copy.time_short,
                 window_accent(window, accent, palette),
                 palette,
             );
@@ -341,14 +376,53 @@ fn plan_row(
     spans
 }
 
-fn push_bar(
+fn push_comparison_bars(
     spans: &mut Vec<Span<'static>>,
     window: &UsageWindow,
     bar_width: usize,
-    accent: Color,
+    quota_label: &'static str,
+    time_label: &'static str,
+    quota_accent: Color,
     palette: Palette,
 ) {
-    let filled = usize::from(window.remaining_percent) * bar_width / 100;
+    let quota_percent =
+        (window.status == UsageStatus::Available).then_some(window.remaining_percent);
+    push_labeled_progress(
+        spans,
+        quota_label,
+        quota_percent,
+        bar_width,
+        quota_accent,
+        quota_percent.map_or(palette.muted, |_| percent_color(window, palette)),
+        palette,
+    );
+    spans.push(Span::raw(" "));
+    let time_percent = window.remaining_time_percent_at(SystemTime::now());
+    push_labeled_progress(
+        spans,
+        time_label,
+        time_percent,
+        bar_width,
+        palette.time,
+        palette.time,
+        palette,
+    );
+}
+
+fn push_labeled_progress(
+    spans: &mut Vec<Span<'static>>,
+    label: &'static str,
+    percent: Option<u8>,
+    bar_width: usize,
+    accent: Color,
+    value_color: Color,
+    palette: Palette,
+) {
+    spans.push(Span::styled(
+        format!("{label} "),
+        Style::default().fg(palette.muted),
+    ));
+    let filled = percent.map_or(0, |value| (usize::from(value) * bar_width + 50) / 100);
     spans.push(Span::styled(
         FILLED_BAR_GLYPH.repeat(filled),
         Style::default().fg(accent),
@@ -357,10 +431,15 @@ fn push_bar(
         EMPTY_BAR_GLYPH.repeat(bar_width - filled),
         Style::default().fg(palette.border),
     ));
+    let value = percent.map_or_else(|| "--".to_owned(), |value| format!("{value}%"));
     spans.push(Span::styled(
-        format!(" {:>3}%", window.remaining_percent),
-        Style::default().fg(percent_color(window, palette)),
+        format!(" {value:>4}"),
+        Style::default().fg(value_color),
     ));
+}
+
+fn progress_pair_fixed_width(quota_label: &str, time_label: &str) -> usize {
+    quota_label.width() + time_label.width() + 13
 }
 
 fn compact_window_model(window: &UsageWindow) -> String {
@@ -491,13 +570,15 @@ fn render_detail(
             .iter()
             .map(|window| localized_window_label(window, language))
             .collect::<Vec<_>>();
+        let pair_fixed = progress_pair_fixed_width(copy.quota, copy.time);
+        let label_limit = usize::from(area.width).saturating_sub(2 + 2 + pair_fixed + 2);
         let columns = DetailColumns {
             label: labels
                 .iter()
                 .map(|label| label.width())
                 .max()
                 .unwrap_or(0)
-                .min(usize::from(area.width).saturating_sub(12)),
+                .min(label_limit),
             reset: plan
                 .windows
                 .iter()
@@ -808,15 +889,17 @@ fn detail_window(
 ) -> Vec<Span<'static>> {
     let label = fit_display_width(localized_label, columns.label);
     let label_padding = columns.label.saturating_sub(label.width());
-    let percent = compact_percent(window);
     let reset = reset_text(window.resets_at, language);
+    let copy = language.copy();
     let total_width = usize::from(width);
-    let fixed_width = 2 + columns.label + 2 + 4;
+    let pair_fixed = progress_pair_fixed_width(copy.quota, copy.time);
+    let fixed_width = 2 + columns.label + 2 + pair_fixed;
     let reset_columns = 2 + columns.reset;
-    let show_reset = width >= 48 && total_width >= fixed_width + 1 + 4 + reset_columns;
-    let reserved_width = fixed_width + 1 + usize::from(show_reset) * reset_columns;
-    let bar_width = if width >= 40 && total_width >= reserved_width + 4 {
-        total_width.saturating_sub(reserved_width).clamp(4, 18)
+    let show_reset = width >= 48 && total_width >= fixed_width + reset_columns + 8;
+    let reserved_width = fixed_width + usize::from(show_reset) * reset_columns + 1;
+    let available_for_bars = total_width.saturating_sub(reserved_width);
+    let bar_width = if available_for_bars >= 2 {
+        (available_for_bars / 2).clamp(1, 12)
     } else {
         0
     };
@@ -825,22 +908,9 @@ fn detail_window(
         format!("  {label}{}  ", " ".repeat(label_padding)),
         Style::default().fg(palette.text),
     )];
-    if bar_width > 0 {
-        let filled = usize::from(window.remaining_percent) * bar_width / 100;
-        spans.push(Span::styled(
-            FILLED_BAR_GLYPH.repeat(filled),
-            Style::default().fg(accent),
-        ));
-        spans.push(Span::styled(
-            EMPTY_BAR_GLYPH.repeat(bar_width - filled),
-            Style::default().fg(palette.border),
-        ));
-        spans.push(Span::raw(" "));
-    }
-    spans.push(Span::styled(
-        format!("{percent:>4}"),
-        Style::default().fg(percent_color(window, palette)),
-    ));
+    push_comparison_bars(
+        &mut spans, window, bar_width, copy.quota, copy.time, accent, palette,
+    );
     if show_reset {
         spans.push(Span::styled(
             format!("  {reset}"),
@@ -893,20 +963,24 @@ fn fit_name(name: &str, width: usize) -> String {
     value
 }
 
-fn room_for_bars(width: u16, name_width: usize, windows: usize) -> bool {
-    windows > 0 && usize::from(width) >= 2 + name_width + windows * 10
+fn pad_left_display(value: &str, width: usize) -> String {
+    format!(
+        "{}{}",
+        " ".repeat(width.saturating_sub(value.width())),
+        value
+    )
 }
 
-fn bar_width(width: u16, name_width: usize, windows: usize) -> usize {
-    if windows == 0 {
-        return 0;
-    }
-    let fixed = 2 + name_width + windows * 8;
-    usize::from(width)
-        .saturating_sub(fixed)
-        .checked_div(windows)
-        .unwrap_or(0)
-        .clamp(1, 8)
+fn comparison_bar_width(width: u16, prefix_width: usize, windows: usize) -> Option<usize> {
+    const PERIOD_COLUMNS: usize = 5;
+    const PAIR_FIXED_COLUMNS: usize = 15;
+
+    let bar_count = windows.checked_mul(2)?;
+    let fixed =
+        prefix_width.checked_add(windows.checked_mul(PERIOD_COLUMNS + PAIR_FIXED_COLUMNS)?)?;
+    let minimum = fixed.checked_add(bar_count)?;
+    let available = usize::from(width).checked_sub(minimum)?;
+    Some((available / bar_count + 1).clamp(1, 8))
 }
 
 fn compact_percent(window: &UsageWindow) -> String {
@@ -915,6 +989,32 @@ fn compact_percent(window: &UsageWindow) -> String {
     } else {
         "--".to_owned()
     }
+}
+
+fn compact_comparison(window: &UsageWindow, copy: UiCopy) -> String {
+    let quota = (window.status == UsageStatus::Available).then_some(window.remaining_percent);
+    let time = window.remaining_time_percent_at(SystemTime::now());
+    format!(
+        "{}{}{} {}{}{}",
+        copy.quota_short,
+        progress_marker(quota),
+        compact_progress_value(quota),
+        copy.time_short,
+        progress_marker(time),
+        compact_progress_value(time),
+    )
+}
+
+fn progress_marker(percent: Option<u8>) -> &'static str {
+    match percent {
+        Some(50..=100) => FILLED_BAR_GLYPH,
+        Some(_) => EMPTY_BAR_GLYPH,
+        None => "·",
+    }
+}
+
+fn compact_progress_value(percent: Option<u8>) -> String {
+    percent.map_or_else(|| "--".to_owned(), |value| format!("{value}%"))
 }
 
 fn percent_color(window: &UsageWindow, palette: Palette) -> Color {
@@ -1173,22 +1273,34 @@ mod tests {
     }
 
     #[test]
-    fn three_windows_use_one_readable_bar_per_row() {
+    fn three_windows_compare_quota_and_time_on_each_row() {
         let backend = draw(&app_with_codex_windows(&[71, 52, 33]), 60, 5);
         let first = text(&backend, 0);
         let second = text(&backend, 1);
         let third = text(&backend, 2);
 
         assert!(
-            first.matches("Codex").count() == 2 && first.contains("7d") && first.contains("71%"),
+            first.matches("Codex").count() == 2
+                && first.contains("7d")
+                && first.contains("71%")
+                && first.contains("T")
+                && first.contains("1%"),
             "{first:?}"
         );
         assert!(
-            second.contains("Spark") && second.contains("5h") && second.contains("52%"),
+            second.contains("Spark")
+                && second.contains("5h")
+                && second.contains("52%")
+                && second.contains("T")
+                && second.contains("40%"),
             "{second:?}"
         );
         assert!(
-            third.contains("Spark") && third.contains("7d") && third.contains("33%"),
+            third.contains("Spark")
+                && third.contains("7d")
+                && third.contains("33%")
+                && third.contains("T")
+                && third.contains("1%"),
             "{third:?}"
         );
         assert_eq!(
@@ -1200,11 +1312,11 @@ mod tests {
         assert_ne!(bar_color(&backend, 0), bar_color(&backend, 1));
         assert_ne!(bar_color(&backend, 1), bar_color(&backend, 2));
         for row in [first, second, third] {
+            assert!(row.contains("Q ") && row.contains("T "), "{row:?}");
             assert!(
                 row.contains(FILLED_BAR_GLYPH) && row.contains(EMPTY_BAR_GLYPH),
                 "{row:?}"
             );
-            assert!(row.contains('━') && row.contains('─'), "{row:?}");
         }
         assert!(text(&backend, 3).contains("Claude"));
         let footer = text(&backend, 4);
@@ -1217,8 +1329,10 @@ mod tests {
     #[test]
     fn short_viewport_keeps_three_windows_compact_and_complete() {
         let backend = draw(&app_with_codex_windows(&[71, 52, 33]), 60, 2);
-        assert!(text(&backend, 0).contains("71%/52%/33%"));
-        assert!(text(&backend, 1).contains("Claude"));
+        let codex = text(&backend, 0);
+        let claude = text(&backend, 1);
+        assert!(codex.contains("Q") && codex.contains("T") && codex.contains("40%"));
+        assert!(claude.contains("Claude") && claude.contains("Q") && claude.contains("T"));
     }
 
     #[test]
@@ -1276,11 +1390,12 @@ mod tests {
     fn detail_view_expands_windows_and_reset_information() {
         let mut app = populated_app();
         app.toggle_detail();
-        let backend = draw(&app, 80, 5);
+        let backend = draw(&app, 100, 5);
         let rendered = (0..5).map(|y| text(&backend, y)).collect::<String>();
         let compact = rendered.replace(' ', "");
         assert!(compact.contains("Codex·7days"), "{rendered:?}");
         assert!(compact.contains("GPT-5.3-Codex-Spark·5hours"));
+        assert!(compact.contains("Quota") && compact.contains("Time"));
         assert_eq!(
             bar_color(&backend, 1),
             provider_accent("openai", test_palette())
@@ -1363,6 +1478,8 @@ mod tests {
         let mut app = populated_app();
         let english = draw(&app, 100, 8);
         assert!(text(&english, 7).contains("Select"));
+        let english_list = (0..7).map(|y| text(&english, y)).collect::<String>();
+        assert!(english_list.contains("Q ") && english_list.contains("T "));
         assert!(text(&english, 7).contains("EN"));
 
         app.cycle_language();
@@ -1376,6 +1493,7 @@ mod tests {
             .replace(' ', "");
         assert!(chinese_list.contains("7天"), "{chinese_list:?}");
         assert!(chinese_list.contains("5时"), "{chinese_list:?}");
+        assert!(chinese_list.contains("额") && chinese_list.contains("时"));
 
         app.toggle_detail();
         let detail = draw(&app, 100, 6);
@@ -1383,6 +1501,35 @@ mod tests {
         let compact = rendered.replace(' ', "");
         assert!(compact.contains("刚刚更新"), "{rendered:?}");
         assert!(compact.contains("小时后重置"), "{rendered:?}");
+        assert!(compact.contains("配额") && compact.contains("时间"));
+    }
+
+    #[test]
+    fn comparison_labels_stay_factual_in_both_languages() {
+        for language in [Language::English, Language::Chinese] {
+            let mut app = populated_app();
+            app.set_language(language);
+            let list = draw(&app, 100, 8);
+            app.toggle_detail();
+            let detail = draw(&app, 100, 6);
+            let rendered = (0..8)
+                .map(|y| text(&list, y))
+                .chain((0..6).map(|y| text(&detail, y)))
+                .collect::<String>();
+
+            for forbidden in [
+                "recommend",
+                "enough",
+                "excess",
+                "save usage",
+                "建议",
+                "够用",
+                "过剩",
+                "省点",
+            ] {
+                assert!(!rendered.to_lowercase().contains(forbidden), "{rendered:?}");
+            }
+        }
     }
 
     #[test]
@@ -1549,7 +1696,7 @@ mod tests {
     fn detail_columns_align_without_clipping_reset_copy() {
         let mut app = app_with_codex_windows(&[71, 52, 33]);
         app.toggle_detail();
-        let backend = draw(&app, 60, 8);
+        let backend = draw(&app, 100, 8);
         let rows = [1, 3, 5];
 
         for row in rows {
