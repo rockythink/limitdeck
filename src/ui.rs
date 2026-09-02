@@ -15,8 +15,8 @@ use crate::{
     theme::{palette, provider_accent, Palette},
 };
 
-const FILLED_BAR_GLYPH: &str = "█";
-const EMPTY_BAR_GLYPH: &str = "░";
+const FILLED_BAR_GLYPH: &str = "━";
+const EMPTY_BAR_GLYPH: &str = "─";
 const TREND_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const SPARK_SHORT_ACCENT: Color = Color::Rgb(42, 183, 184);
 const SPARK_LONG_ACCENT: Color = Color::Rgb(64, 145, 214);
@@ -729,7 +729,7 @@ mod tests {
                 row.contains(FILLED_BAR_GLYPH) && row.contains(EMPTY_BAR_GLYPH),
                 "{row:?}"
             );
-            assert!(row.contains('█') && row.contains('░'), "{row:?}");
+            assert!(row.contains('━') && row.contains('─'), "{row:?}");
         }
         assert!(text(&backend, 3).contains("Claude"));
         let footer = text(&backend, 4);

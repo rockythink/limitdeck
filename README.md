@@ -7,9 +7,9 @@ A compact, privacy-safe terminal dashboard for AI coding subscription limits.
 ![LimitDeck demo](assets/limitdeck.gif)
 
 ```text
-› Codex    Codex    7d  ██████████████░░░░░░░░░░  61%
-           Spark    5h  ████████████████████████ 100%
-           Spark    7d  ████████████████████████ 100%
+› Codex    Codex    7d  ━━━━━━━━━━━━━━──────────  61%
+           Spark    5h  ━━━━━━━━━━━━━━━━━━━━━━━━ 100%
+           Spark    7d  ━━━━━━━━━━━━━━━━━━━━━━━━ 100%
 ```
 
 LimitDeck reuses official local login surfaces when they exist. It does not copy credentials, read browser cookies, scrape subscription pages, or read Codex `auth.json`.

@@ -7,9 +7,9 @@
 ![LimitDeck 演示](assets/limitdeck.gif)
 
 ```text
-› Codex    Codex    7d  ██████████████░░░░░░░░░░  61%
-           Spark    5h  ████████████████████████ 100%
-           Spark    7d  ████████████████████████ 100%
+› Codex    Codex    7d  ━━━━━━━━━━━━━━──────────  61%
+           Spark    5h  ━━━━━━━━━━━━━━━━━━━━━━━━ 100%
+           Spark    7d  ━━━━━━━━━━━━━━━━━━━━━━━━ 100%
 ```
 
 LimitDeck 优先复用 Provider 的官方本地登录入口。它不会复制凭证、读取浏览器 Cookie、抓取订阅网页，也不会直接读取 Codex 的 `auth.json`。
