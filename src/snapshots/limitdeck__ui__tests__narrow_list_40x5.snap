@@ -2,8 +2,8 @@
 source: src/ui.rs
 expression: snapshot_text(&backend)
 ---
-› Codex    Codex    7d Q ━  71% T ─   1%
-           Spark    5h Q ━  52% T ─  40%
-           Spark    7d Q ─  33% T ─   1%
-  Claude   Q━63% T─40%/Q━82% T─1%
+› Codex    Q━71%/━52%/─33%
+           T─1% /─40%/─1%
+  Claude     5h Q ━─  63%  7d Q ━━  82%
+             5h T ━─  40%  7d T ──   1%
   ↑↓/jk Select · Enter Details · r Refre

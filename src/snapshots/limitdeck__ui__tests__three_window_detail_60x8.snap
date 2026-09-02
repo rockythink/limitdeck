@@ -3,10 +3,10 @@ source: src/ui.rs
 expression: snapshot_text(&backend)
 ---
 ‹ Codex  Updated just now
-  Codex · 7 days                 Quota ━─  71% Time ──   1%
-    Collecting history
-  GPT-5.3-Codex-Spark · 5 hours  Quota ━─  52% Time ━─  40%
-    Collecting history
-  GPT-5.3-Codex-Spark · 7 days   Quota ━─  33% Time ──   1%
-    Collecting history
+  Codex · 7 days                 Quota ━━━━━━━━━━━────  71%
+                                 Time  ───────────────   1%
+  GPT-5.3-Codex-Spark · 5 hours  Quota ━━━━━━━━───────  52%
+                                 Time  ━━━━━━─────────  40%
+  GPT-5.3-Codex-Spark · 7 days   Quota ━━━━━──────────  33%
+                                 Time  ───────────────   1%
   Esc Back · r Refresh · t Rainbow · l EN · q Quit

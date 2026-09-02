@@ -120,12 +120,12 @@ LimitDeck reads the first non-empty value from `LC_ALL`, `LC_MESSAGES`, and `LAN
 
 ### Quota and time
 
-Every reset window places two remaining percentages on the same 100-to-0 scale:
+Every reset window places two remaining percentages on vertically aligned rows using the same 100-to-0 scale:
 
 - **Q / Quota** — quota remaining.
 - **T / Time** — time remaining until reset, divided by the window's full duration.
 
-The list and detail views present these measurements side by side. LimitDeck does not classify usage or recommend what to do.
+The list and detail views place quota above time so their bars share the same starting point and are directly comparable. LimitDeck does not classify usage or recommend what to do.
 
 ### Themes
 
@@ -151,7 +151,7 @@ Theme changes apply immediately to the list and detail views for the current ses
 | <kbd>l</kbd> | Switch between English and Chinese |
 | <kbd>q</kbd> | Exit |
 
-The layout collapses to compact quota/time comparisons in narrow terminals and keeps the selected plan visible when the list exceeds the viewport.
+Narrow terminals retain the vertical quota/time comparison in a compact form and keep the selected plan visible when the list exceeds the viewport.
 
 ### Local quota history
 

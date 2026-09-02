@@ -1,0 +1,15 @@
+---
+source: src/ui.rs
+expression: snapshot_text(&backend)
+---
+‹ Codex  Updated just now
+  Codex · 7 days                 Quota ━━━━━━━━━━━━─────  71%  Resets in 1 hour
+                                 Time  ─────────────────   1%
+    Last 1 second  71% · flat · 2 samples
+  GPT-5.3-Codex-Spark · 5 hours  Quota ━━━━━━━━━────────  52%  Resets in 1 hour
+                                 Time  ━━━━━━━──────────  40%
+    Last 1 second  52% · flat · 2 samples
+  GPT-5.3-Codex-Spark · 7 days   Quota ━━━━━━───────────  33%  Resets in 1 hour
+                                 Time  ─────────────────   1%
+    Last 1 second  33% · flat · 2 samples
+  Esc Back · r Refresh · t Rainbow · l EN · q Quit
