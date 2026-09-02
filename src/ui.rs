@@ -14,17 +14,15 @@ use crate::{
     app::{App, PlanPhase, PlanState},
     domain::{UsageStatus, UsageWindow},
     history::{HistorySample, UsageHistory},
-    theme::{palette, provider_accent, Palette},
+    theme::{provider_accent, Palette, Theme},
 };
 
 const FILLED_BAR_GLYPH: &str = "━";
 const EMPTY_BAR_GLYPH: &str = "─";
-const SPARK_SHORT_ACCENT: Color = Color::Rgb(42, 183, 184);
-const SPARK_LONG_ACCENT: Color = Color::Rgb(64, 145, 214);
 
 pub fn render(frame: &mut Frame<'_>, app: &App, history: &UsageHistory) {
     let area = frame.area();
-    let palette = palette();
+    let palette = app.theme().palette();
     frame.render_widget(
         Block::default().style(Style::default().bg(palette.background)),
         area,
@@ -46,18 +44,47 @@ pub fn render(frame: &mut Frame<'_>, app: &App, history: &UsageHistory) {
     }
 
     if let Some(footer_area) = footer_area {
-        let text = if app.is_detail_open() {
-            "  Esc 返回 · r 刷新 · q 退出"
+        let prefix = if app.is_detail_open() {
+            "  Esc 返回 · r 刷新 · t "
         } else {
-            "  ↑↓/jk 选择 · Enter 详情 · r 刷新 · q 退出"
+            "  ↑↓/jk 选择 · Enter 详情 · r 刷新 · t "
         };
-        render_line(
-            frame,
-            footer_area,
-            vec![Span::styled(text, Style::default().fg(palette.muted))],
-            palette.background,
-        );
+        let spans = footer_spans(prefix, app.theme(), palette);
+        render_line(frame, footer_area, spans, palette.background);
     }
+}
+
+fn footer_spans(prefix: &'static str, theme: Theme, palette: Palette) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(9);
+    spans.push(Span::styled(prefix, Style::default().fg(palette.muted)));
+    if theme == Theme::Rainbow {
+        for (letter, color) in [
+            ("R", Color::Rgb(255, 91, 146)),
+            ("a", Color::Rgb(255, 143, 96)),
+            ("i", Color::Rgb(255, 202, 87)),
+            ("n", Color::Rgb(80, 235, 190)),
+            ("b", Color::Rgb(64, 214, 255)),
+            ("o", Color::Rgb(91, 157, 255)),
+            ("w", Color::Rgb(181, 117, 255)),
+        ] {
+            spans.push(Span::styled(
+                letter,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ));
+        }
+    } else {
+        spans.push(Span::styled(
+            theme.label(),
+            Style::default()
+                .fg(palette.warning)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans.push(Span::styled(
+        " · q 退出",
+        Style::default().fg(palette.muted),
+    ));
+    spans
 }
 
 fn render_plan_list(frame: &mut Frame<'_>, area: Rect, app: &App, palette: Palette) {
@@ -187,7 +214,7 @@ fn stacked_plan_rows(
             } else {
                 vec![Span::raw(" ".repeat(prefix_width))]
             };
-            let row_accent = window_accent(window, accent);
+            let row_accent = window_accent(window, accent, palette);
             spans.push(Span::styled(
                 fit_name(&compact_window_model(window), model_width),
                 Style::default().fg(row_accent),
@@ -257,7 +284,7 @@ fn plan_row(state: &PlanState, width: u16, selected: bool, palette: Palette) -> 
                 &mut spans,
                 window,
                 bar_width,
-                window_accent(window, accent),
+                window_accent(window, accent, palette),
                 palette,
             );
         }
@@ -322,13 +349,13 @@ fn is_spark_window(window: &UsageWindow) -> bool {
             .any(|part| part.eq_ignore_ascii_case("spark"))
 }
 
-fn window_accent(window: &UsageWindow, default: Color) -> Color {
+fn window_accent(window: &UsageWindow, default: Color, palette: Palette) -> Color {
     if !is_spark_window(window) {
         return default;
     }
     match window.period {
-        Some(period) if period < Duration::from_secs(24 * 60 * 60) => SPARK_SHORT_ACCENT,
-        _ => SPARK_LONG_ACCENT,
+        Some(period) if period < Duration::from_secs(24 * 60 * 60) => palette.spark_short,
+        _ => palette.spark_long,
     }
 }
 
@@ -416,7 +443,7 @@ fn render_detail(
             if next_y >= area.height {
                 break;
             }
-            let window_accent = window_accent(window, accent);
+            let window_accent = window_accent(window, accent, palette);
             let spans = detail_window(
                 window,
                 area.width,
@@ -820,10 +847,15 @@ mod tests {
     use crate::{
         app::PlanEvent,
         domain::{CodingPlan, PlanIdentity},
+        theme::Theme,
     };
     use ratatui::{backend::TestBackend, Terminal};
 
     use insta::assert_snapshot;
+
+    fn test_palette() -> Palette {
+        Theme::Rainbow.palette()
+    }
 
     fn plan(id: &str, provider_id: &str, display_name: &str, values: &[u8]) -> CodingPlan {
         CodingPlan {
@@ -969,9 +1001,12 @@ mod tests {
             third.contains("Spark") && third.contains("7d") && third.contains("33%"),
             "{third:?}"
         );
-        assert_eq!(bar_color(&backend, 0), provider_accent("openai", palette()));
-        assert_eq!(bar_color(&backend, 1), SPARK_SHORT_ACCENT);
-        assert_eq!(bar_color(&backend, 2), SPARK_LONG_ACCENT);
+        assert_eq!(
+            bar_color(&backend, 0),
+            provider_accent("openai", test_palette())
+        );
+        assert_eq!(bar_color(&backend, 1), test_palette().spark_short);
+        assert_eq!(bar_color(&backend, 2), test_palette().spark_long);
         assert_ne!(bar_color(&backend, 0), bar_color(&backend, 1));
         assert_ne!(bar_color(&backend, 1), bar_color(&backend, 2));
         for row in [first, second, third] {
@@ -1021,10 +1056,13 @@ mod tests {
     fn selection_has_a_marker_and_surface_background() {
         let backend = draw(&populated_app(), 60, 2);
         assert_eq!(backend.buffer().cell((0, 0)).unwrap().symbol(), "›");
-        assert_eq!(backend.buffer().cell((0, 0)).unwrap().bg, palette().surface);
+        assert_eq!(
+            backend.buffer().cell((0, 0)).unwrap().bg,
+            test_palette().surface
+        );
         assert_eq!(
             backend.buffer().cell((0, 1)).unwrap().bg,
-            palette().background
+            test_palette().background
         );
     }
 
@@ -1033,11 +1071,11 @@ mod tests {
         let backend = draw(&populated_app(), 60, 2);
         assert_eq!(
             backend.buffer().cell((2, 0)).unwrap().fg,
-            provider_accent("openai", palette())
+            provider_accent("openai", test_palette())
         );
         assert_eq!(
             backend.buffer().cell((2, 1)).unwrap().fg,
-            provider_accent("anthropic", palette())
+            provider_accent("anthropic", test_palette())
         );
     }
 
@@ -1050,8 +1088,11 @@ mod tests {
         let compact = rendered.replace(' ', "");
         assert!(compact.contains("普通Codex·7天"), "{rendered:?}");
         assert!(compact.contains("GPT-5.3-Codex-Spark·5小时"));
-        assert_eq!(bar_color(&backend, 1), provider_accent("openai", palette()));
-        assert_eq!(bar_color(&backend, 2), SPARK_SHORT_ACCENT);
+        assert_eq!(
+            bar_color(&backend, 1),
+            provider_accent("openai", test_palette())
+        );
+        assert_eq!(bar_color(&backend, 2), test_palette().spark_short);
         assert!(compact.contains("后重置"));
         let footer = text(&backend, 4);
         assert!(footer.replace(' ', "").contains("Esc返回"), "{footer:?}");
@@ -1063,6 +1104,56 @@ mod tests {
         let footer = text(&backend, 7);
         assert!(footer.replace(' ', "").contains("Enter详情"), "{footer:?}");
         assert!(!text(&backend, 2).contains("Enter 详情"));
+    }
+
+    #[test]
+    fn rainbow_footer_label_uses_seven_distinct_colors() {
+        let spans = footer_spans("", Theme::Rainbow, Theme::Rainbow.palette());
+        let colors = spans[1..8]
+            .iter()
+            .map(|span| span.style.fg)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            colors,
+            vec![
+                Some(Color::Rgb(255, 91, 146)),
+                Some(Color::Rgb(255, 143, 96)),
+                Some(Color::Rgb(255, 202, 87)),
+                Some(Color::Rgb(80, 235, 190)),
+                Some(Color::Rgb(64, 214, 255)),
+                Some(Color::Rgb(91, 157, 255)),
+                Some(Color::Rgb(181, 117, 255)),
+            ]
+        );
+    }
+
+    #[test]
+    fn theme_cycle_changes_surface_accents_and_footer_label() {
+        let mut app = populated_app();
+        let rainbow = draw(&app, 100, 4);
+        assert!(text(&rainbow, 3).contains("Rainbow"));
+        assert_eq!(
+            rainbow.buffer().cell((0, 0)).unwrap().bg,
+            Theme::Rainbow.palette().surface
+        );
+        let rainbow_bar = bar_color(&rainbow, 0);
+
+        app.cycle_theme();
+        let midnight = draw(&app, 100, 4);
+        assert!(text(&midnight, 3).contains("Midnight"));
+        assert_eq!(
+            midnight.buffer().cell((0, 0)).unwrap().bg,
+            Theme::Midnight.palette().surface
+        );
+        assert_ne!(rainbow_bar, bar_color(&midnight, 0));
+
+        app.cycle_theme();
+        let mono = draw(&app, 100, 4);
+        assert!(text(&mono, 3).contains("Mono"));
+        assert_eq!(
+            mono.buffer().cell((0, 0)).unwrap().bg,
+            Theme::Mono.palette().surface
+        );
     }
 
     #[test]

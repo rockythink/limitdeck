@@ -167,6 +167,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
                 app.toggle_detail();
                 redraw = true;
             }
+            KeyCode::Char('t') => {
+                app.cycle_theme();
+                redraw = true;
+            }
             KeyCode::Char('r') if !app.worker_disconnected() => {
                 request_refresh(&worker, &mut app);
                 next_refresh = Instant::now() + REFRESH_INTERVAL;

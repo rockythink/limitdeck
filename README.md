@@ -78,9 +78,12 @@ This setting replaces an existing custom Claude Code status line. If you already
 | `Enter` | Open or close plan details |
 | `Esc` | Return to the list, then exit |
 | `r` | Refresh |
+| `t` | Cycle Rainbow, Midnight, and Mono themes |
 | `q` | Exit |
 
 The layout degrades to compact percentages in narrow terminals and keeps the selected plan visible when the list is taller than the viewport.
+
+Rainbow is the default theme: a deep background with green, violet, pink, orange, and blue accents inspired by OMP. Theme changes apply immediately to both the list and detail views for the current session.
 
 Open a plan to see locally sampled quota history when the terminal has enough rows. A changing current-cycle history with at least three samples is rendered as a compact Braille line with its actual time span, start and end values, and delta; flat or sparse history stays textual instead of drawing a misleading bar. A quota increase starts a new visual cycle. History is stored at `$XDG_CACHE_HOME/limitdeck/history.json`, or `~/.cache/limitdeck/history.json` when `XDG_CACHE_HOME` is unset. LimitDeck keeps at most 30 days and 2,048 samples per quota window; after the first two real samples, unchanged values are sampled no more than once every 15 minutes.
 

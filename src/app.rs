@@ -11,6 +11,7 @@ use std::{
 use crate::{
     adapter::{AdapterError, AdapterErrorKind, PlanAdapter},
     domain::{CodingPlan, PlanIdentity},
+    theme::Theme,
 };
 
 const MAX_SNAPSHOT_AGE: Duration = Duration::from_secs(15 * 60);
@@ -90,6 +91,7 @@ pub struct App {
     plans: Vec<PlanState>,
     selected: usize,
     detail_open: bool,
+    theme: Theme,
     worker_disconnected: bool,
 }
 
@@ -105,6 +107,7 @@ impl App {
             plans,
             selected: 0,
             detail_open: false,
+            theme: Theme::default(),
             worker_disconnected: false,
         }
     }
@@ -123,6 +126,14 @@ impl App {
 
     pub fn is_detail_open(&self) -> bool {
         self.detail_open
+    }
+
+    pub fn theme(&self) -> Theme {
+        self.theme
+    }
+
+    pub fn cycle_theme(&mut self) {
+        self.theme = self.theme.next();
     }
 
     pub fn select_next(&mut self) {
@@ -412,6 +423,17 @@ mod tests {
         assert!(!empty.is_detail_open());
     }
 
+    #[test]
+    fn theme_cycle_starts_at_rainbow_and_wraps() {
+        let mut app = App::new(std::iter::empty::<PlanIdentity>());
+        assert_eq!(app.theme(), Theme::Rainbow);
+        app.cycle_theme();
+        assert_eq!(app.theme(), Theme::Midnight);
+        app.cycle_theme();
+        assert_eq!(app.theme(), Theme::Mono);
+        app.cycle_theme();
+        assert_eq!(app.theme(), Theme::Rainbow);
+    }
     #[test]
     fn worker_fetches_adapters_in_parallel() {
         let delay = Duration::from_millis(80);
