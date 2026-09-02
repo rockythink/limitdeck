@@ -4,9 +4,12 @@
 
 A compact, privacy-safe terminal dashboard for AI coding subscription limits.
 
+![LimitDeck demo](assets/limitdeck.gif)
+
 ```text
-Codex   5h ███████░ 71%  7d █████░░░ 52%
-Claude  5h ██████░░ 63%  7d ███████░ 82%
+› Codex    Codex    7d  ━━━━━━━━━━━━━━──────────  61%
+           Spark    5h  ━━━━━━━━━━━━━━━━━━━━━━━━ 100%
+           Spark    7d  ━━━━━━━━━━━━━━━━━━━━━━━━ 100%
 ```
 
 LimitDeck reuses official local login surfaces when they exist. It does not copy credentials, read browser cookies, scrape subscription pages, or read Codex `auth.json`.
@@ -23,13 +26,25 @@ Codex App Server is preferred over the OMP fallback when both are available.
 
 ## Install
 
-Rust 1.88 or newer is required.
+### Homebrew
 
 ```bash
-cargo install --git https://github.com/rockythink/limitdeck
+brew install rockythink/tap/limitdeck
 ```
 
-Run it from any terminal:
+### Cargo
+
+Rust 1.88 or newer is required:
+
+```bash
+cargo install limitdeck
+```
+
+### Prebuilt binaries
+
+Download macOS or Linux archives and `SHA256SUMS` from the [latest GitHub Release](https://github.com/rockythink/limitdeck/releases/latest).
+
+Run LimitDeck from any terminal:
 
 ```bash
 limitdeck

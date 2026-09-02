@@ -27,10 +27,33 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         area,
     );
 
-    if app.is_detail_open() {
-        render_detail(frame, area, app, palette);
+    let (content_area, footer_area) = if area.height >= 3 {
+        (
+            Rect::new(area.x, area.y, area.width, area.height - 1),
+            Some(row(area, area.height - 1)),
+        )
     } else {
-        render_plan_list(frame, area, app, palette);
+        (area, None)
+    };
+
+    if app.is_detail_open() {
+        render_detail(frame, content_area, app, palette);
+    } else {
+        render_plan_list(frame, content_area, app, palette);
+    }
+
+    if let Some(footer_area) = footer_area {
+        let text = if app.is_detail_open() {
+            "  Esc 返回 · r 刷新 · q 退出"
+        } else {
+            "  ↑↓/jk 选择 · Enter 详情 · r 刷新 · q 退出"
+        };
+        render_line(
+            frame,
+            footer_area,
+            vec![Span::styled(text, Style::default().fg(palette.muted))],
+            palette.background,
+        );
     }
 }
 
@@ -81,18 +104,6 @@ fn render_plan_list(frame: &mut Frame<'_>, area: Rect, app: &App, palette: Palet
             render_line(frame, row(area, screen_row as u16), spans, background);
             screen_row += 1;
         }
-    }
-
-    if screen_row < viewport_height {
-        render_line(
-            frame,
-            row(area, screen_row as u16),
-            vec![Span::styled(
-                "  ↑↓/jk 选择 · Enter 详情 · r 刷新 · q 退出",
-                Style::default().fg(palette.muted),
-            )],
-            palette.background,
-        );
     }
 }
 
@@ -366,19 +377,6 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &App, palette: Palette)
             )],
             palette.background,
         );
-        next_y += 1;
-    }
-
-    if next_y < area.height {
-        render_line(
-            frame,
-            row(area, next_y),
-            vec![Span::styled(
-                "  Esc 返回 · r 刷新 · q 退出",
-                Style::default().fg(palette.muted),
-            )],
-            palette.background,
-        );
     }
 }
 
@@ -633,7 +631,7 @@ mod tests {
 
     #[test]
     fn three_windows_use_one_readable_bar_per_row() {
-        let backend = draw(&app_with_codex_windows(&[71, 52, 33]), 60, 4);
+        let backend = draw(&app_with_codex_windows(&[71, 52, 33]), 60, 5);
         let first = text(&backend, 0);
         let second = text(&backend, 1);
         let third = text(&backend, 2);
@@ -663,6 +661,8 @@ mod tests {
             assert!(!row.contains('█') && !row.contains('░'), "{row:?}");
         }
         assert!(text(&backend, 3).contains("Claude"));
+        let footer = text(&backend, 4);
+        assert!(footer.replace(' ', "").contains("Enter详情"), "{footer:?}");
     }
 
     #[test]
@@ -677,7 +677,7 @@ mod tests {
         let mut app = app_with_codex_windows(&[71, 52, 33]);
         app.select_next();
 
-        let backend = draw(&app, 60, 3);
+        let backend = draw(&app, 60, 4);
         assert!(text(&backend, 0).contains("Claude"));
         assert_eq!(backend.buffer().cell((0, 0)).unwrap().symbol(), "›");
     }
@@ -732,7 +732,16 @@ mod tests {
         assert_eq!(bar_color(&backend, 1), provider_accent("openai", palette()));
         assert_eq!(bar_color(&backend, 2), SPARK_SHORT_ACCENT);
         assert!(compact.contains("后重置"));
-        assert!(compact.contains("Esc返回"));
+        let footer = text(&backend, 4);
+        assert!(footer.replace(' ', "").contains("Esc返回"), "{footer:?}");
+    }
+
+    #[test]
+    fn list_footer_stays_on_last_row() {
+        let backend = draw(&populated_app(), 80, 8);
+        let footer = text(&backend, 7);
+        assert!(footer.replace(' ', "").contains("Enter详情"), "{footer:?}");
+        assert!(!text(&backend, 2).contains("Enter 详情"));
     }
 
     #[test]

@@ -23,26 +23,68 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const HELP: &str = concat!(
+    "LimitDeck ",
+    env!("CARGO_PKG_VERSION"),
+    "\nA privacy-safe terminal dashboard for AI subscription limits.\n\n",
+    "Usage:\n",
+    "  limitdeck\n",
+    "  limitdeck ingest claude\n",
+    "  limitdeck --help\n",
+    "  limitdeck --version\n\n",
+    "Options:\n",
+    "  -h, --help       Print help\n",
+    "  -V, --version    Print version\n\n",
+    "Commands:\n",
+    "  ingest claude    Store a quota-only snapshot from Claude Code status-line JSON"
+);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Command {
+    Dashboard,
+    IngestClaude,
+    Help,
+    Version,
+}
 
 fn main() -> ExitCode {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
-    if arguments == ["ingest", "claude"] {
-        let line = adapters::ingest_claude_statusline()
-            .unwrap_or_else(|_| "Claude quota unavailable".to_owned());
-        println!("{line}");
-        return ExitCode::SUCCESS;
-    }
-    if !arguments.is_empty() {
-        eprintln!("用法：limitdeck [ingest claude]");
-        return ExitCode::FAILURE;
-    }
-
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("LimitDeck 无法启动：{error}");
+    match parse_command(&arguments) {
+        Ok(Command::Dashboard) => match run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("LimitDeck 无法启动：{error}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(Command::IngestClaude) => {
+            let line = adapters::ingest_claude_statusline()
+                .unwrap_or_else(|_| "Claude quota unavailable".to_owned());
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Ok(Command::Help) => {
+            println!("{HELP}");
+            ExitCode::SUCCESS
+        }
+        Ok(Command::Version) => {
+            println!("limitdeck {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
+        Err(()) => {
+            eprintln!("Invalid arguments.\n\n{HELP}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn parse_command(arguments: &[String]) -> Result<Command, ()> {
+    match arguments {
+        [] => Ok(Command::Dashboard),
+        [argument] if argument == "-h" || argument == "--help" => Ok(Command::Help),
+        [argument] if argument == "-V" || argument == "--version" => Ok(Command::Version),
+        [ingest, claude] if ingest == "ingest" && claude == "claude" => Ok(Command::IngestClaude),
+        _ => Err(()),
     }
 }
 
@@ -181,5 +223,36 @@ impl Drop for TerminalSession {
             let _ = disable_raw_mode();
             let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen, Show);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arguments(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn parses_standard_commands() {
+        assert_eq!(parse_command(&[]), Ok(Command::Dashboard));
+        assert_eq!(parse_command(&arguments(&["--help"])), Ok(Command::Help));
+        assert_eq!(parse_command(&arguments(&["-h"])), Ok(Command::Help));
+        assert_eq!(
+            parse_command(&arguments(&["--version"])),
+            Ok(Command::Version)
+        );
+        assert_eq!(parse_command(&arguments(&["-V"])), Ok(Command::Version));
+        assert_eq!(
+            parse_command(&arguments(&["ingest", "claude"])),
+            Ok(Command::IngestClaude)
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_arguments() {
+        assert_eq!(parse_command(&arguments(&["--unknown"])), Err(()));
+        assert_eq!(parse_command(&arguments(&["ingest"])), Err(()));
     }
 }

@@ -4,9 +4,12 @@
 
 一个极简、隐私安全的 AI Coding Plan 剩余额度终端面板。
 
+![LimitDeck 演示](assets/limitdeck.gif)
+
 ```text
-Codex   5h ███████░ 71%  7d █████░░░ 52%
-Claude  5h ██████░░ 63%  7d ███████░ 82%
+› Codex    Codex    7d  ━━━━━━━━━━━━━━──────────  61%
+           Spark    5h  ━━━━━━━━━━━━━━━━━━━━━━━━ 100%
+           Spark    7d  ━━━━━━━━━━━━━━━━━━━━━━━━ 100%
 ```
 
 LimitDeck 优先复用 Provider 的官方本地登录入口。它不会复制凭证、读取浏览器 Cookie、抓取订阅网页，也不会直接读取 Codex 的 `auth.json`。
@@ -23,11 +26,23 @@ Codex 官方 App Server 与 OMP 同时可用时，LimitDeck 优先使用官方�
 
 ## 安装
 
+### Homebrew
+
+```bash
+brew install rockythink/tap/limitdeck
+```
+
+### Cargo
+
 需要 Rust 1.88 或更高版本：
 
 ```bash
-cargo install --git https://github.com/rockythink/limitdeck
+cargo install limitdeck
 ```
+
+### 预编译二进制
+
+从 [GitHub 最新 Release](https://github.com/rockythink/limitdeck/releases/latest) 下载 macOS 或 Linux 压缩包及 `SHA256SUMS`。
 
 安装后可在任意终端运行：
 
