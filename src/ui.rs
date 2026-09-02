@@ -11,15 +11,17 @@ use ratatui::{
 use crate::{
     app::{App, PlanPhase, PlanState},
     domain::{UsageStatus, UsageWindow},
+    history::{HistorySample, UsageHistory},
     theme::{palette, provider_accent, Palette},
 };
 
-const FILLED_BAR_GLYPH: &str = "━";
-const EMPTY_BAR_GLYPH: &str = "─";
+const FILLED_BAR_GLYPH: &str = "█";
+const EMPTY_BAR_GLYPH: &str = "░";
+const TREND_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const SPARK_SHORT_ACCENT: Color = Color::Rgb(42, 183, 184);
 const SPARK_LONG_ACCENT: Color = Color::Rgb(64, 145, 214);
 
-pub fn render(frame: &mut Frame<'_>, app: &App) {
+pub fn render(frame: &mut Frame<'_>, app: &App, history: &UsageHistory) {
     let area = frame.area();
     let palette = palette();
     frame.render_widget(
@@ -37,7 +39,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     };
 
     if app.is_detail_open() {
-        render_detail(frame, content_area, app, palette);
+        render_detail(frame, content_area, app, history, palette);
     } else {
         render_plan_list(frame, content_area, app, palette);
     }
@@ -329,7 +331,13 @@ fn window_accent(window: &UsageWindow, default: Color) -> Color {
     }
 }
 
-fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &App, palette: Palette) {
+fn render_detail(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    history: &UsageHistory,
+    palette: Palette,
+) {
     if area.width < 12 || area.height == 0 {
         return;
     }
@@ -358,14 +366,27 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &App, palette: Palette)
 
     let mut next_y = 1;
     if let Some(plan) = &state.plan {
-        for window in plan
-            .windows
-            .iter()
-            .take(area.height.saturating_sub(1) as usize)
-        {
-            let spans = detail_window(window, area.width, window_accent(window, accent), palette);
+        let show_trends = area.width >= 40
+            && usize::from(area.height.saturating_sub(1)) >= plan.windows.len().saturating_mul(2);
+        for window in &plan.windows {
+            if next_y >= area.height {
+                break;
+            }
+            let window_accent = window_accent(window, accent);
+            let spans = detail_window(window, area.width, window_accent, palette);
             render_line(frame, row(area, next_y), spans, palette.background);
             next_y += 1;
+
+            if show_trends && next_y < area.height {
+                let samples = history.samples(&plan.provider_id, &plan.id, &window.id);
+                render_line(
+                    frame,
+                    row(area, next_y),
+                    trend_line(samples, area.width, window_accent, palette),
+                    palette.background,
+                );
+                next_y += 1;
+            }
         }
     } else if next_y < area.height {
         render_line(
@@ -378,6 +399,47 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &App, palette: Palette)
             palette.background,
         );
     }
+}
+
+fn trend_line(
+    samples: &[HistorySample],
+    width: u16,
+    accent: Color,
+    palette: Palette,
+) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled(
+        "    趋势  ".to_owned(),
+        Style::default().fg(palette.muted),
+    )];
+    if samples.len() < 2 {
+        spans.push(Span::styled(
+            "收集中（至少 2 个样本）",
+            Style::default().fg(palette.muted),
+        ));
+        return spans;
+    }
+
+    let graph_width = usize::from(width.saturating_sub(22)).clamp(8, 48);
+    spans.push(Span::styled(
+        sparkline(samples, graph_width),
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(
+        "  旧 → 新",
+        Style::default().fg(palette.muted),
+    ));
+    spans
+}
+
+fn sparkline(samples: &[HistorySample], width: usize) -> String {
+    let visible = samples.len().min(width);
+    let start = samples.len() - visible;
+    let mut graph = String::with_capacity(visible * 3);
+    for sample in &samples[start..] {
+        let level = usize::from(sample.remaining_percent) * (TREND_GLYPHS.len() - 1) / 100;
+        graph.push(TREND_GLYPHS[level]);
+    }
+    graph
 }
 
 fn detail_window(
@@ -592,9 +654,18 @@ mod tests {
     }
 
     fn draw(app: &App, width: u16, height: u16) -> TestBackend {
+        draw_with_history(app, &UsageHistory::empty(), width, height)
+    }
+
+    fn draw_with_history(
+        app: &App,
+        history: &UsageHistory,
+        width: u16,
+        height: u16,
+    ) -> TestBackend {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal.draw(|frame| render(frame, app, history)).unwrap();
         terminal.backend().clone()
     }
 
@@ -658,7 +729,7 @@ mod tests {
                 row.contains(FILLED_BAR_GLYPH) && row.contains(EMPTY_BAR_GLYPH),
                 "{row:?}"
             );
-            assert!(!row.contains('█') && !row.contains('░'), "{row:?}");
+            assert!(row.contains('█') && row.contains('░'), "{row:?}");
         }
         assert!(text(&backend, 3).contains("Claude"));
         let footer = text(&backend, 4);
@@ -773,5 +844,70 @@ mod tests {
         for forbidden in ["email", "account", "organization", "billing", "token"] {
             assert!(!rendered.to_lowercase().contains(forbidden));
         }
+    }
+    #[test]
+    fn detail_view_shows_real_history_sparklines_when_space_allows() {
+        let mut history = UsageHistory::empty();
+        let mut earlier = plan("codex", "openai", "Codex", &[71, 52]);
+        earlier.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(1);
+        history.record(&earlier).unwrap();
+        let mut later = plan("codex", "openai", "Codex", &[55, 48]);
+        later.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(2);
+        history.record(&later).unwrap();
+
+        let mut app = populated_app();
+        app.toggle_detail();
+        let backend = draw_with_history(&app, &history, 80, 7);
+        let first_trend = text(&backend, 2);
+        let second_trend = text(&backend, 4);
+        let first_compact = first_trend.replace(' ', "");
+        let second_compact = second_trend.replace(' ', "");
+        assert!(first_compact.contains("趋势"), "{first_trend:?}");
+        assert!(second_compact.contains("趋势"), "{second_trend:?}");
+        assert!(TREND_GLYPHS
+            .iter()
+            .any(|glyph| first_trend.contains(*glyph)));
+        assert!(first_compact.contains("旧→新"));
+        assert!(text(&backend, 6).replace(' ', "").contains("Esc返回"));
+    }
+
+    #[test]
+    fn detail_view_labels_unseeded_history_without_faking_a_trend() {
+        let mut app = populated_app();
+        app.toggle_detail();
+        let backend = draw(&app, 80, 7);
+        let trend = text(&backend, 2);
+        let compact = trend.replace(' ', "");
+        assert!(compact.contains("收集中"), "{trend:?}");
+        assert!(!compact.contains("旧→新"), "{trend:?}");
+    }
+
+    #[test]
+    fn three_window_detail_uses_trends_only_when_all_fit() {
+        let mut history = UsageHistory::empty();
+        let mut earlier = plan("codex", "openai", "Codex", &[71, 52, 33]);
+        earlier.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(1);
+        history.record(&earlier).unwrap();
+        let mut later = plan("codex", "openai", "Codex", &[68, 49, 31]);
+        later.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(2);
+        history.record(&later).unwrap();
+
+        let mut app = app_with_codex_windows(&[68, 49, 31]);
+        app.toggle_detail();
+
+        let tall = draw_with_history(&app, &history, 80, 8);
+        for row_index in [2, 4, 6] {
+            let row = text(&tall, row_index).replace(' ', "");
+            assert!(row.contains("趋势") && row.contains("旧→新"), "{row:?}");
+        }
+        assert!(text(&tall, 7).replace(' ', "").contains("Esc返回"));
+
+        let short = draw_with_history(&app, &history, 80, 5);
+        let rendered = (0..5).map(|y| text(&short, y)).collect::<String>();
+        let compact = rendered.replace(' ', "");
+        assert!(compact.contains("普通Codex"), "{rendered:?}");
+        assert_eq!(compact.matches("GPT-5.3-Codex-Spark").count(), 2);
+        assert!(!compact.contains("趋势"), "{rendered:?}");
+        assert!(text(&short, 4).replace(' ', "").contains("Esc返回"));
     }
 }

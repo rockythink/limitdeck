@@ -7,9 +7,9 @@ A compact, privacy-safe terminal dashboard for AI coding subscription limits.
 ![LimitDeck demo](assets/limitdeck.gif)
 
 ```text
-› Codex    Codex    7d  ━━━━━━━━━━━━━━──────────  61%
-           Spark    5h  ━━━━━━━━━━━━━━━━━━━━━━━━ 100%
-           Spark    7d  ━━━━━━━━━━━━━━━━━━━━━━━━ 100%
+› Codex    Codex    7d  ██████████████░░░░░░░░░░  61%
+           Spark    5h  ████████████████████████ 100%
+           Spark    7d  ████████████████████████ 100%
 ```
 
 LimitDeck reuses official local login surfaces when they exist. It does not copy credentials, read browser cookies, scrape subscription pages, or read Codex `auth.json`.
@@ -82,6 +82,8 @@ This setting replaces an existing custom Claude Code status line. If you already
 
 The layout degrades to compact percentages in narrow terminals and keeps the selected plan visible when the list is taller than the viewport.
 
+Open a plan to see locally sampled remaining-quota sparklines when the terminal has enough rows. History is stored at `$XDG_CACHE_HOME/limitdeck/history.json`, or `~/.cache/limitdeck/history.json` when `XDG_CACHE_HOME` is unset. LimitDeck keeps at most 30 days and 2,048 samples per quota window; after the first two real samples, unchanged values are sampled no more than once every 15 minutes.
+
 ## Privacy model
 
 LimitDeck retains only:
@@ -89,7 +91,7 @@ LimitDeck retains only:
 - provider, plan, and quota-window identifiers
 - display labels and window durations
 - remaining percentages and reset times
-- snapshot timestamps and availability state
+- quota-history timestamps, remaining percentages, and availability state
 
 It deliberately ignores account email, account ID, organization, plan tier, billing data, raw credentials, and raw provider responses. Parser inputs and subprocess output are size-bounded. Child processes have explicit timeouts and are reaped on exit.
 
@@ -111,7 +113,7 @@ official protocol / safe snapshot / optional fallback
                          |
            CodingPlan -> UsageWindow
                          |
-                  App state -> TUI
+             App state + local history -> TUI
 ```
 
 Adapters own provider-specific parsing and timeouts. The domain and UI do not depend on Codex, Claude, or OMP response formats.

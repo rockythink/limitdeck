@@ -2,6 +2,7 @@ mod adapter;
 mod adapters;
 mod app;
 mod domain;
+mod history;
 mod theme;
 mod ui;
 
@@ -12,13 +13,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use app::{App, PlanWorker};
+use app::{App, PlanEvent, PlanWorker};
 use crossterm::{
     cursor::Show,
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use history::UsageHistory;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
@@ -102,11 +104,18 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
         .collect::<Vec<_>>();
     let worker = PlanWorker::spawn(adapters);
     let mut app = App::new(identities);
+    let mut history = UsageHistory::load_default();
     let mut next_refresh = Instant::now();
     let mut redraw = true;
 
     loop {
         while let Ok(Some(event)) = worker.try_recv() {
+            if let PlanEvent::Fetched {
+                result: Ok(plan), ..
+            } = &event
+            {
+                let _ = history.record(plan);
+            }
             app.apply_event(event);
             redraw = true;
         }
@@ -118,7 +127,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
         }
 
         if redraw {
-            terminal.draw(|frame| ui::render(frame, &app))?;
+            terminal.draw(|frame| ui::render(frame, &app, &history))?;
             redraw = false;
         }
 

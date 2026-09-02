@@ -7,9 +7,9 @@
 ![LimitDeck 演示](assets/limitdeck.gif)
 
 ```text
-› Codex    Codex    7d  ━━━━━━━━━━━━━━──────────  61%
-           Spark    5h  ━━━━━━━━━━━━━━━━━━━━━━━━ 100%
-           Spark    7d  ━━━━━━━━━━━━━━━━━━━━━━━━ 100%
+› Codex    Codex    7d  ██████████████░░░░░░░░░░  61%
+           Spark    5h  ████████████████████████ 100%
+           Spark    7d  ████████████████████████ 100%
 ```
 
 LimitDeck 优先复用 Provider 的官方本地登录入口。它不会复制凭证、读取浏览器 Cookie、抓取订阅网页，也不会直接读取 Codex 的 `auth.json`。
@@ -82,6 +82,8 @@ Claude Code 通过官方 status line 输入提供订阅额度。将以下配置�
 
 窄终端会自动降级为紧凑百分比；Plan 数量超过窗口高度时，列表会跟随选中项滚动。
 
+打开 Plan 详情后，终端行数充足时会显示本地采样的剩余额度趋势图。历史数据保存在 `$XDG_CACHE_HOME/limitdeck/history.json`；未设置 `XDG_CACHE_HOME` 时使用 `~/.cache/limitdeck/history.json`。每个额度窗口最多保留 30 天和 2,048 个样本；取得前两个真实样本后，未变化的值最多每 15 分钟采样一次。
+
 ## 隐私模型
 
 LimitDeck 只保留：
@@ -89,7 +91,7 @@ LimitDeck 只保留：
 - Provider、Plan 和额度窗口标识
 - 展示标签与窗口周期
 - 剩余百分比与重置时间
-- 快照时间与可用状态
+- 额度历史的时间戳、剩余百分比与可用状态
 
 它会主动忽略邮箱、account ID、组织、套餐等级、账单信息、原始凭证和 Provider 原始响应。Parser 输入与子进程输出均有大小限制；子进程有明确超时，并在退出时回收。
 
@@ -111,7 +113,7 @@ cargo build --release
                |
     CodingPlan -> UsageWindow
                |
-          App 状态 -> TUI
+      App 状态 + 本地历史 -> TUI
 ```
 
 Adapter 负责 Provider 特定的解析与超时；领域模型和 UI 不依赖 Codex、Claude 或 OMP 的响应格式。
