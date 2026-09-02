@@ -82,7 +82,7 @@ Claude Code 通过官方 status line 输入提供订阅额度。将以下配置�
 
 窄终端会自动降级为紧凑百分比；Plan 数量超过窗口高度时，列表会跟随选中项滚动。
 
-打开 Plan 详情后，终端行数充足时会显示本地采样的剩余额度趋势图。历史数据保存在 `$XDG_CACHE_HOME/limitdeck/history.json`；未设置 `XDG_CACHE_HOME` 时使用 `~/.cache/limitdeck/history.json`。每个额度窗口最多保留 30 天和 2,048 个样本；取得前两个真实样本后，未变化的值最多每 15 分钟采样一次。
+打开 Plan 详情后，终端行数充足时会显示本地采样的额度历史。当前重置周期内至少有 3 个样本且额度发生变化时，界面会绘制紧凑的 Braille 微型折线，并标注真实时间跨度、起止值和变化量；历史持平或样本稀疏时只显示文字摘要，避免画出误导性的粗条。额度上升时开启新的视觉周期。历史数据保存在 `$XDG_CACHE_HOME/limitdeck/history.json`；未设置 `XDG_CACHE_HOME` 时使用 `~/.cache/limitdeck/history.json`。每个额度窗口最多保留 30 天和 2,048 个样本；取得前两个真实样本后，未变化的值最多每 15 分钟采样一次。
 
 ## 隐私模型
 

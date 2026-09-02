@@ -82,7 +82,7 @@ This setting replaces an existing custom Claude Code status line. If you already
 
 The layout degrades to compact percentages in narrow terminals and keeps the selected plan visible when the list is taller than the viewport.
 
-Open a plan to see locally sampled remaining-quota sparklines when the terminal has enough rows. History is stored at `$XDG_CACHE_HOME/limitdeck/history.json`, or `~/.cache/limitdeck/history.json` when `XDG_CACHE_HOME` is unset. LimitDeck keeps at most 30 days and 2,048 samples per quota window; after the first two real samples, unchanged values are sampled no more than once every 15 minutes.
+Open a plan to see locally sampled quota history when the terminal has enough rows. A changing current-cycle history with at least three samples is rendered as a compact Braille line with its actual time span, start and end values, and delta; flat or sparse history stays textual instead of drawing a misleading bar. A quota increase starts a new visual cycle. History is stored at `$XDG_CACHE_HOME/limitdeck/history.json`, or `~/.cache/limitdeck/history.json` when `XDG_CACHE_HOME` is unset. LimitDeck keeps at most 30 days and 2,048 samples per quota window; after the first two real samples, unchanged values are sampled no more than once every 15 minutes.
 
 ## Privacy model
 

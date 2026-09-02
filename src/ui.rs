@@ -7,6 +7,7 @@ use ratatui::{
     widgets::{Block, Paragraph},
     Frame,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, PlanPhase, PlanState},
@@ -17,7 +18,6 @@ use crate::{
 
 const FILLED_BAR_GLYPH: &str = "━";
 const EMPTY_BAR_GLYPH: &str = "─";
-const TREND_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const SPARK_SHORT_ACCENT: Color = Color::Rgb(42, 183, 184);
 const SPARK_LONG_ACCENT: Color = Color::Rgb(64, 145, 214);
 
@@ -366,6 +366,19 @@ fn render_detail(
 
     let mut next_y = 1;
     if let Some(plan) = &state.plan {
+        let detail_label_width = plan
+            .windows
+            .iter()
+            .map(|window| window.label.width())
+            .max()
+            .unwrap_or(0)
+            .min(usize::from(area.width).saturating_sub(12));
+        let reset_width = plan
+            .windows
+            .iter()
+            .map(|window| reset_text(window.resets_at).width())
+            .max()
+            .unwrap_or(0);
         let show_trends = area.width >= 40
             && usize::from(area.height.saturating_sub(1)) >= plan.windows.len().saturating_mul(2);
         for window in &plan.windows {
@@ -373,7 +386,14 @@ fn render_detail(
                 break;
             }
             let window_accent = window_accent(window, accent);
-            let spans = detail_window(window, area.width, window_accent, palette);
+            let spans = detail_window(
+                window,
+                area.width,
+                detail_label_width,
+                reset_width,
+                window_accent,
+                palette,
+            );
             render_line(frame, row(area, next_y), spans, palette.background);
             next_y += 1;
 
@@ -407,37 +427,140 @@ fn trend_line(
     accent: Color,
     palette: Palette,
 ) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::styled(
-        "    趋势  ".to_owned(),
-        Style::default().fg(palette.muted),
-    )];
-    if samples.len() < 2 {
+    let samples = current_cycle(samples);
+    let mut spans = vec![Span::raw("    ")];
+    let Some(first) = samples.first() else {
         spans.push(Span::styled(
-            "收集中（至少 2 个样本）",
+            "历史收集中",
+            Style::default().fg(palette.muted),
+        ));
+        return spans;
+    };
+    if samples.len() == 1 {
+        spans.push(Span::styled(
+            "历史收集中 · 1 个样本",
             Style::default().fg(palette.muted),
         ));
         return spans;
     }
 
-    let graph_width = usize::from(width.saturating_sub(22)).clamp(8, 48);
+    let last = samples
+        .last()
+        .expect("history contains at least two samples");
+    let span = history_span(first.at_millis, last.at_millis);
+    let delta = i16::from(last.remaining_percent) - i16::from(first.remaining_percent);
+    if delta == 0 {
+        spans.push(Span::styled(
+            format!(
+                "{span}  {}% · 持平 · {} 个样本",
+                last.remaining_percent,
+                samples.len()
+            ),
+            Style::default().fg(palette.muted),
+        ));
+        return spans;
+    }
+
     spans.push(Span::styled(
-        sparkline(samples, graph_width),
-        Style::default().fg(accent).add_modifier(Modifier::BOLD),
-    ));
-    spans.push(Span::styled(
-        "  旧 → 新",
+        format!("{span}  "),
         Style::default().fg(palette.muted),
     ));
+    if samples.len() >= 3 && width >= 56 {
+        let graph_width = usize::from(width.saturating_sub(48)).clamp(8, 16);
+        spans.push(Span::styled(
+            braille_chart(samples, graph_width),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(
+                "  {}% → {}% · {}",
+                first.remaining_percent,
+                last.remaining_percent,
+                delta_text(delta)
+            ),
+            Style::default().fg(palette.muted),
+        ));
+    } else {
+        spans.push(Span::styled(
+            format!(
+                "{}% → {}% · {} · {} 个样本",
+                first.remaining_percent,
+                last.remaining_percent,
+                delta_text(delta),
+                samples.len()
+            ),
+            Style::default().fg(palette.muted),
+        ));
+    }
     spans
 }
 
-fn sparkline(samples: &[HistorySample], width: usize) -> String {
-    let visible = samples.len().min(width);
-    let start = samples.len() - visible;
-    let mut graph = String::with_capacity(visible * 3);
-    for sample in &samples[start..] {
-        let level = usize::from(sample.remaining_percent) * (TREND_GLYPHS.len() - 1) / 100;
-        graph.push(TREND_GLYPHS[level]);
+fn current_cycle(samples: &[HistorySample]) -> &[HistorySample] {
+    let start = samples
+        .windows(2)
+        .rposition(|pair| pair[1].remaining_percent > pair[0].remaining_percent)
+        .map_or(0, |index| index + 1);
+    &samples[start..]
+}
+
+fn history_span(first_millis: u64, last_millis: u64) -> String {
+    let seconds = last_millis.saturating_sub(first_millis) / 1_000;
+    if seconds < 60 {
+        format!("近 {} 秒", seconds.max(1))
+    } else if seconds < 60 * 60 {
+        format!("近 {} 分钟", seconds / 60)
+    } else if seconds < 24 * 60 * 60 {
+        format!("近 {} 小时", seconds / (60 * 60))
+    } else {
+        format!("近 {} 天", seconds / (24 * 60 * 60))
+    }
+}
+
+fn delta_text(delta: i16) -> String {
+    if delta > 0 {
+        format!("+{delta}%")
+    } else {
+        format!("−{}%", delta.unsigned_abs())
+    }
+}
+
+fn braille_chart(samples: &[HistorySample], width: usize) -> String {
+    const DOTS: [[u8; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
+
+    let min = samples
+        .iter()
+        .map(|sample| sample.remaining_percent)
+        .min()
+        .expect("Braille chart requires samples");
+    let max = samples
+        .iter()
+        .map(|sample| sample.remaining_percent)
+        .max()
+        .expect("Braille chart requires samples");
+    let range = u32::from(max - min).max(1);
+    let pixel_columns = width.saturating_mul(2).max(2);
+    let position_denominator = pixel_columns - 1;
+    let sample_denominator = samples.len() - 1;
+    let mut graph = String::with_capacity(width * 3);
+
+    for cell in 0..width {
+        let mut dots = 0_u8;
+        for (column, dot_rows) in DOTS.iter().enumerate() {
+            let x = cell * 2 + column;
+            let position = x * sample_denominator;
+            let lower = position / position_denominator;
+            let remainder = position % position_denominator;
+            let upper = (lower + 1).min(sample_denominator);
+            let lower_value = usize::from(samples[lower].remaining_percent);
+            let upper_value = usize::from(samples[upper].remaining_percent);
+            let interpolated = (lower_value * (position_denominator - remainder)
+                + upper_value * remainder)
+                / position_denominator;
+            let vertical = (u32::from(max) - interpolated as u32) * 3;
+            let row = ((vertical + range / 2) / range).min(3) as usize;
+            dots |= dot_rows[row];
+        }
+        graph.push(char::from_u32(0x2800 + u32::from(dots)).expect("valid Braille cell"));
     }
     graph
 }
@@ -445,15 +568,31 @@ fn sparkline(samples: &[HistorySample], width: usize) -> String {
 fn detail_window(
     window: &UsageWindow,
     width: u16,
+    label_width: usize,
+    reset_width: usize,
     accent: Color,
     palette: Palette,
 ) -> Vec<Span<'static>> {
+    let label = fit_display_width(&window.label, label_width);
+    let label_padding = label_width.saturating_sub(label.width());
+    let percent = compact_percent(window);
+    let reset = reset_text(window.resets_at);
+    let total_width = usize::from(width);
+    let fixed_width = 2 + label_width + 2 + 4;
+    let reset_columns = 2 + reset_width;
+    let show_reset = width >= 48 && total_width >= fixed_width + 1 + 4 + reset_columns;
+    let reserved_width = fixed_width + 1 + usize::from(show_reset) * reset_columns;
+    let bar_width = if width >= 40 && total_width >= reserved_width + 4 {
+        total_width.saturating_sub(reserved_width).clamp(4, 18)
+    } else {
+        0
+    };
+
     let mut spans = vec![Span::styled(
-        format!("  {}  ", window.label),
+        format!("  {label}{}  ", " ".repeat(label_padding)),
         Style::default().fg(palette.text),
     )];
-    if width >= 40 {
-        let bar_width = usize::from(width.saturating_sub(36)).clamp(4, 18);
+    if bar_width > 0 {
         let filled = usize::from(window.remaining_percent) * bar_width / 100;
         spans.push(Span::styled(
             FILLED_BAR_GLYPH.repeat(filled),
@@ -466,16 +605,39 @@ fn detail_window(
         spans.push(Span::raw(" "));
     }
     spans.push(Span::styled(
-        compact_percent(window),
+        format!("{percent:>4}"),
         Style::default().fg(percent_color(window, palette)),
     ));
-    if width >= 48 {
+    if show_reset {
         spans.push(Span::styled(
-            format!("  {}", reset_text(window.resets_at)),
+            format!("  {reset}"),
             Style::default().fg(palette.muted),
         ));
     }
     spans
+}
+
+fn fit_display_width(value: &str, max_width: usize) -> String {
+    if value.width() <= max_width {
+        return value.to_owned();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let content_width = max_width - 1;
+    let mut fitted = String::with_capacity(value.len());
+    let mut used_width = 0;
+    for character in value.chars() {
+        let character_width = character.width().unwrap_or(0);
+        if used_width + character_width > content_width {
+            break;
+        }
+        fitted.push(character);
+        used_width += character_width;
+    }
+    fitted.push('…');
+    fitted
 }
 
 fn render_line(frame: &mut Frame<'_>, area: Rect, spans: Vec<Span<'static>>, background: Color) {
@@ -562,11 +724,11 @@ fn freshness(fetched_at: SystemTime) -> String {
     if age.as_secs() < 60 {
         "刚刚更新".to_owned()
     } else if age.as_secs() < 3600 {
-        format!("{}m 前更新", age.as_secs() / 60)
+        format!("{} 分钟前更新", age.as_secs() / 60)
     } else if age.as_secs() < 86_400 {
-        format!("{}h 前更新", age.as_secs() / 3600)
+        format!("{} 小时前更新", age.as_secs() / 3600)
     } else {
-        format!("{}d 前更新", age.as_secs() / 86_400)
+        format!("{} 天前更新", age.as_secs() / 86_400)
     }
 }
 
@@ -578,13 +740,13 @@ fn reset_text(resets_at: Option<SystemTime>) -> String {
         return "已重置".to_owned();
     };
     if remaining.as_secs() < 60 {
-        "1m 内重置".to_owned()
+        "1 分钟内重置".to_owned()
     } else if remaining.as_secs() < 3600 {
-        format!("{}m 后重置", remaining.as_secs() / 60)
+        format!("{} 分钟后重置", remaining.as_secs() / 60)
     } else if remaining.as_secs() < 86_400 {
-        format!("{}h 后重置", remaining.as_secs() / 3600)
+        format!("{} 小时后重置", remaining.as_secs() / 3600)
     } else {
-        format!("{}d 后重置", remaining.as_secs() / 86_400)
+        format!("{} 天后重置", remaining.as_secs() / 86_400)
     }
 }
 
@@ -673,6 +835,12 @@ mod tests {
         (0..backend.buffer().area.width)
             .map(|x| backend.buffer().cell((x, y)).unwrap().symbol())
             .collect::<String>()
+    }
+
+    fn contains_braille(value: &str) -> bool {
+        value
+            .chars()
+            .any(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
     }
 
     fn bar_color(backend: &TestBackend, y: u16) -> Color {
@@ -846,29 +1014,51 @@ mod tests {
         }
     }
     #[test]
-    fn detail_view_shows_real_history_sparklines_when_space_allows() {
+    fn detail_view_shows_real_history_braille_when_space_allows() {
         let mut history = UsageHistory::empty();
         let mut earlier = plan("codex", "openai", "Codex", &[71, 52]);
         earlier.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(1);
         history.record(&earlier).unwrap();
+        let mut middle = plan("codex", "openai", "Codex", &[63, 50]);
+        middle.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(2);
+        history.record(&middle).unwrap();
         let mut later = plan("codex", "openai", "Codex", &[55, 48]);
-        later.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(2);
+        later.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(3);
         history.record(&later).unwrap();
 
-        let mut app = populated_app();
+        let mut app = app_with_codex_windows(&[55, 48]);
         app.toggle_detail();
         let backend = draw_with_history(&app, &history, 80, 7);
         let first_trend = text(&backend, 2);
         let second_trend = text(&backend, 4);
         let first_compact = first_trend.replace(' ', "");
         let second_compact = second_trend.replace(' ', "");
-        assert!(first_compact.contains("趋势"), "{first_trend:?}");
-        assert!(second_compact.contains("趋势"), "{second_trend:?}");
-        assert!(TREND_GLYPHS
-            .iter()
-            .any(|glyph| first_trend.contains(*glyph)));
-        assert!(first_compact.contains("旧→新"));
+        assert!(contains_braille(&first_trend), "{first_trend:?}");
+        assert!(contains_braille(&second_trend), "{second_trend:?}");
+        assert!(first_compact.contains("近2秒"), "{first_trend:?}");
+        assert!(first_compact.contains("71%→55%·−16%"), "{first_trend:?}");
+        assert!(second_compact.contains("52%→48%·−4%"), "{second_trend:?}");
+        assert!(!first_compact.contains("旧→新"));
         assert!(text(&backend, 6).replace(' ', "").contains("Esc返回"));
+    }
+
+    #[test]
+    fn flat_history_uses_an_honest_text_summary() {
+        let mut history = UsageHistory::empty();
+        let mut earlier = plan("codex", "openai", "Codex", &[71, 52]);
+        earlier.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(1);
+        history.record(&earlier).unwrap();
+        let mut later = plan("codex", "openai", "Codex", &[71, 52]);
+        later.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(2);
+        history.record(&later).unwrap();
+
+        let mut app = populated_app();
+        app.toggle_detail();
+        let backend = draw_with_history(&app, &history, 80, 7);
+        let trend = text(&backend, 2);
+        let compact = trend.replace(' ', "");
+        assert!(compact.contains("近1秒71%·持平·2个样本"), "{trend:?}");
+        assert!(!contains_braille(&trend), "{trend:?}");
     }
 
     #[test]
@@ -878,8 +1068,35 @@ mod tests {
         let backend = draw(&app, 80, 7);
         let trend = text(&backend, 2);
         let compact = trend.replace(' ', "");
-        assert!(compact.contains("收集中"), "{trend:?}");
-        assert!(!compact.contains("旧→新"), "{trend:?}");
+        assert!(compact.contains("历史收集中"), "{trend:?}");
+        assert!(!contains_braille(&trend), "{trend:?}");
+    }
+
+    #[test]
+    fn quota_increase_starts_a_new_visual_history_cycle() {
+        let samples = [
+            HistorySample {
+                at_millis: 1,
+                remaining_percent: 40,
+            },
+            HistorySample {
+                at_millis: 2,
+                remaining_percent: 35,
+            },
+            HistorySample {
+                at_millis: 3,
+                remaining_percent: 100,
+            },
+            HistorySample {
+                at_millis: 4,
+                remaining_percent: 95,
+            },
+        ];
+
+        let current = current_cycle(&samples);
+        assert_eq!(current.len(), 2);
+        assert_eq!(current[0].remaining_percent, 100);
+        assert_eq!(current[1].remaining_percent, 95);
     }
 
     #[test]
@@ -888,8 +1105,11 @@ mod tests {
         let mut earlier = plan("codex", "openai", "Codex", &[71, 52, 33]);
         earlier.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(1);
         history.record(&earlier).unwrap();
+        let mut middle = plan("codex", "openai", "Codex", &[70, 50, 32]);
+        middle.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(2);
+        history.record(&middle).unwrap();
         let mut later = plan("codex", "openai", "Codex", &[68, 49, 31]);
-        later.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(2);
+        later.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(3);
         history.record(&later).unwrap();
 
         let mut app = app_with_codex_windows(&[68, 49, 31]);
@@ -897,8 +1117,13 @@ mod tests {
 
         let tall = draw_with_history(&app, &history, 80, 8);
         for row_index in [2, 4, 6] {
-            let row = text(&tall, row_index).replace(' ', "");
-            assert!(row.contains("趋势") && row.contains("旧→新"), "{row:?}");
+            let row = text(&tall, row_index);
+            let compact = row.replace(' ', "");
+            assert!(contains_braille(&row), "{row:?}");
+            assert!(
+                compact.contains("近2秒") && compact.contains('→'),
+                "{row:?}"
+            );
         }
         assert!(text(&tall, 7).replace(' ', "").contains("Esc返回"));
 
@@ -907,7 +1132,43 @@ mod tests {
         let compact = rendered.replace(' ', "");
         assert!(compact.contains("普通Codex"), "{rendered:?}");
         assert_eq!(compact.matches("GPT-5.3-Codex-Spark").count(), 2);
-        assert!(!compact.contains("趋势"), "{rendered:?}");
+        assert!(!contains_braille(&rendered), "{rendered:?}");
         assert!(text(&short, 4).replace(' ', "").contains("Esc返回"));
+    }
+
+    #[test]
+    fn detail_columns_align_without_clipping_reset_copy() {
+        let mut app = app_with_codex_windows(&[71, 52, 33]);
+        app.toggle_detail();
+        let backend = draw(&app, 60, 8);
+        let rows = [1, 3, 5];
+
+        for row in rows {
+            let rendered = text(&backend, row);
+            assert!(
+                rendered.replace(' ', "").contains("小时后重置"),
+                "{rendered:?}"
+            );
+        }
+
+        let bar_starts = rows.map(|row| {
+            (0..backend.buffer().area.width)
+                .find(|x| {
+                    matches!(
+                        backend.buffer().cell((*x, row)).unwrap().symbol(),
+                        FILLED_BAR_GLYPH | EMPTY_BAR_GLYPH
+                    )
+                })
+                .expect("detail row should contain a quota bar")
+        });
+        assert!(bar_starts.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+    #[test]
+    fn relative_time_copy_uses_chinese_units() {
+        assert!(freshness(SystemTime::now() - Duration::from_secs(2 * 3600)).contains("小时前更新"));
+        assert_eq!(
+            reset_text(Some(SystemTime::now() + Duration::from_secs(5 * 3600 + 5))),
+            "5 小时后重置"
+        );
     }
 }
