@@ -3,6 +3,7 @@ source: src/ui.rs
 expression: snapshot_text(&backend)
 ---
 ‹ Codex  Updated just now
+  2 secondary limits shown · s Hide
   Codex · 7 days                 Quota ━━━━━━━━━━━────  71%
                                  Time  ───────────────   1%
   GPT-5.3-Codex-Spark · 5 hours  Quota ━━━━━━━━───────  52%

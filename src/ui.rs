@@ -12,7 +12,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{
     adapter::{AdapterError, AdapterErrorKind},
     app::{App, PlanPhase, PlanState},
-    domain::{UsageStatus, UsageWindow},
+    domain::{CodingPlan, UsageStatus, UsageWindow},
     history::{HistorySample, UsageHistory},
     locale::{Language, UiCopy},
     theme::{provider_accent, Palette, Theme},
@@ -144,6 +144,7 @@ fn render_plan_list(
 
     let viewport_height = usize::from(area.height);
     let start = viewport_start(app, area.width, viewport_height);
+    let secondary_limits_visible = app.secondary_limits_visible();
     let mut screen_row = 0usize;
 
     for (index, plan) in app.plans().iter().enumerate().skip(start) {
@@ -160,6 +161,7 @@ fn render_plan_list(
             selected,
             palette,
             language,
+            secondary_limits_visible,
         );
         if screen_row + rows.len() > viewport_height {
             break;
@@ -173,36 +175,58 @@ fn render_plan_list(
 
 fn viewport_start(app: &App, width: u16, viewport_height: usize) -> usize {
     let selected = app.selected_index();
+    let secondary_limits_visible = app.secondary_limits_visible();
     let mut start = 0usize;
     let mut occupied = app.plans()[..=selected]
         .iter()
-        .map(|plan| plan_height(plan, width, viewport_height))
+        .map(|plan| plan_height(plan, width, viewport_height, secondary_limits_visible))
         .sum::<usize>();
 
     while occupied > viewport_height && start < selected {
-        occupied =
-            occupied.saturating_sub(plan_height(&app.plans()[start], width, viewport_height));
+        occupied = occupied.saturating_sub(plan_height(
+            &app.plans()[start],
+            width,
+            viewport_height,
+            secondary_limits_visible,
+        ));
         start += 1;
     }
     start
 }
 
-fn plan_height(state: &PlanState, width: u16, viewport_height: usize) -> usize {
+fn plan_height(
+    state: &PlanState,
+    width: u16,
+    viewport_height: usize,
+    secondary_limits_visible: bool,
+) -> usize {
     let Some(plan) = &state.plan else {
         return 1;
     };
-    if uses_stacked_rows(state, width, viewport_height) {
-        plan.windows.len().saturating_mul(2)
+    let status_height = usize::from(secondary_window_count(plan) > 0);
+    if uses_stacked_rows(state, width, viewport_height, secondary_limits_visible) {
+        visible_window_count(plan, secondary_limits_visible)
+            .saturating_mul(2)
+            .saturating_add(status_height)
     } else {
-        2
+        2 + status_height
     }
 }
 
-fn uses_stacked_rows(state: &PlanState, width: u16, viewport_height: usize) -> bool {
+fn uses_stacked_rows(
+    state: &PlanState,
+    width: u16,
+    viewport_height: usize,
+    secondary_limits_visible: bool,
+) -> bool {
     let Some(plan) = &state.plan else {
         return false;
     };
-    width >= 40 && plan.windows.len() > 2 && plan.windows.len().saturating_mul(2) <= viewport_height
+    let visible_count = visible_window_count(plan, secondary_limits_visible);
+    let required_height = visible_count
+        .saturating_mul(2)
+        .saturating_add(usize::from(secondary_window_count(plan) > 0));
+    width >= 40 && visible_count > 2 && required_height <= viewport_height
 }
 
 fn plan_rows(
@@ -212,11 +236,26 @@ fn plan_rows(
     selected: bool,
     palette: Palette,
     language: Language,
+    secondary_limits_visible: bool,
 ) -> Vec<Vec<Span<'static>>> {
-    if uses_stacked_rows(state, width, viewport_height) {
-        return stacked_plan_rows(state, width, selected, palette, language);
+    if uses_stacked_rows(state, width, viewport_height, secondary_limits_visible) {
+        return stacked_plan_rows(
+            state,
+            width,
+            selected,
+            palette,
+            language,
+            secondary_limits_visible,
+        );
     }
-    plan_comparison_rows(state, width, selected, palette, language)
+    plan_comparison_rows(
+        state,
+        width,
+        selected,
+        palette,
+        language,
+        secondary_limits_visible,
+    )
 }
 
 fn stacked_plan_rows(
@@ -225,6 +264,7 @@ fn stacked_plan_rows(
     selected: bool,
     palette: Palette,
     language: Language,
+    secondary_limits_visible: bool,
 ) -> Vec<Vec<Span<'static>>> {
     let accent = provider_accent(&state.identity.provider_id, palette);
     let name_width = 9usize;
@@ -235,9 +275,16 @@ fn stacked_plan_rows(
     let bar_width =
         metric_bar_width(width, prefix_width + model_width, 1, metric_label_width).unwrap_or(1);
     let plan = state.plan.as_ref().expect("stacked rows require a plan");
-    let mut rows = Vec::with_capacity(plan.windows.len().saturating_mul(2));
+    let secondary_count = secondary_window_count(plan);
+    let visible_count = visible_window_count(plan, secondary_limits_visible);
+    let mut rows = Vec::with_capacity(visible_count.saturating_mul(2).saturating_add(1));
 
-    for (index, window) in plan.windows.iter().enumerate() {
+    for (index, window) in plan
+        .windows
+        .iter()
+        .filter(|window| window_is_visible(window, secondary_limits_visible))
+        .enumerate()
+    {
         let mut quota = if index == 0 {
             vec![
                 Span::styled(
@@ -301,6 +348,14 @@ fn stacked_plan_rows(
         );
         rows.push(time);
     }
+    if secondary_count > 0 {
+        rows.push(secondary_status_row(
+            secondary_count,
+            secondary_limits_visible,
+            palette,
+            language,
+        ));
+    }
     rows
 }
 
@@ -310,6 +365,7 @@ fn plan_comparison_rows(
     selected: bool,
     palette: Palette,
     language: Language,
+    secondary_limits_visible: bool,
 ) -> Vec<Vec<Span<'static>>> {
     let accent = provider_accent(&state.identity.provider_id, palette);
     let name_width = if width < 32 { 7 } else { 9 };
@@ -336,10 +392,15 @@ fn plan_comparison_rows(
     let mut time = vec![Span::raw(" ".repeat(prefix_width))];
     let copy = language.copy();
     let metric_label_width = copy.quota_short.width().max(copy.time_short.width());
+    let visible_count = visible_window_count(plan, secondary_limits_visible);
     if let Some(bar_width) =
-        metric_bar_width(width, prefix_width, plan.windows.len(), metric_label_width)
+        metric_bar_width(width, prefix_width, visible_count, metric_label_width)
     {
-        for window in &plan.windows {
+        for window in plan
+            .windows
+            .iter()
+            .filter(|window| window_is_visible(window, secondary_limits_visible))
+        {
             let period = period_label(window.period, language);
             let period_cell = format!(" {} ", pad_left_display(&period, LIST_PERIOD_WIDTH));
             quota.push(Span::styled(
@@ -375,14 +436,25 @@ fn plan_comparison_rows(
             );
         }
     } else {
-        let (detailed_quota, detailed_time) =
-            compact_metric_rows(&plan.windows, copy.quota_short, copy.time_short, true);
+        let (detailed_quota, detailed_time) = compact_metric_rows(
+            &plan.windows,
+            copy.quota_short,
+            copy.time_short,
+            true,
+            secondary_limits_visible,
+        );
         let use_markers =
             prefix_width + detailed_quota.width().max(detailed_time.width()) <= usize::from(width);
         let (quota_values, time_values) = if use_markers {
             (detailed_quota, detailed_time)
         } else {
-            compact_metric_rows(&plan.windows, copy.quota_short, copy.time_short, false)
+            compact_metric_rows(
+                &plan.windows,
+                copy.quota_short,
+                copy.time_short,
+                false,
+                secondary_limits_visible,
+            )
         };
         quota.push(Span::styled(
             quota_values,
@@ -398,9 +470,18 @@ fn plan_comparison_rows(
             Style::default().fg(palette.muted),
         ));
     }
-    vec![quota, time]
+    let secondary_count = secondary_window_count(plan);
+    let mut rows = vec![quota, time];
+    if secondary_count > 0 {
+        rows.push(secondary_status_row(
+            secondary_count,
+            secondary_limits_visible,
+            palette,
+            language,
+        ));
+    }
+    rows
 }
-
 fn push_labeled_progress(
     spans: &mut Vec<Span<'static>>,
     label: &str,
@@ -440,6 +521,10 @@ fn metric_bar_width(
     windows: usize,
     label_width: usize,
 ) -> Option<usize> {
+    if windows == 0 {
+        return None;
+    }
+
     const PERIOD_COLUMNS: usize = 5;
     const VALUE_COLUMNS: usize = 6;
     let fixed = prefix_width
@@ -453,11 +538,19 @@ fn compact_metric_rows(
     quota_label: &str,
     time_label: &str,
     markers: bool,
+    secondary_limits_visible: bool,
 ) -> (String, String) {
-    let mut quota_cells = Vec::with_capacity(windows.len());
-    let mut time_cells = Vec::with_capacity(windows.len());
-    let mut widths = Vec::with_capacity(windows.len());
-    for window in windows {
+    let visible_count = windows
+        .iter()
+        .filter(|window| window_is_visible(window, secondary_limits_visible))
+        .count();
+    let mut quota_cells = Vec::with_capacity(visible_count);
+    let mut time_cells = Vec::with_capacity(visible_count);
+    let mut widths = Vec::with_capacity(visible_count);
+    for window in windows
+        .iter()
+        .filter(|window| window_is_visible(window, secondary_limits_visible))
+    {
         let quota_percent =
             (window.status == UsageStatus::Available).then_some(window.remaining_percent);
         let time_percent = window.remaining_time_percent_at(SystemTime::now());
@@ -538,6 +631,39 @@ fn is_spark_window(window: &UsageWindow) -> bool {
             .label
             .split(|character: char| !character.is_ascii_alphanumeric())
             .any(|part| part.eq_ignore_ascii_case("spark"))
+}
+
+fn window_is_visible(window: &UsageWindow, secondary_limits_visible: bool) -> bool {
+    secondary_limits_visible || !is_spark_window(window)
+}
+
+fn secondary_window_count(plan: &CodingPlan) -> usize {
+    plan.windows
+        .iter()
+        .filter(|window| is_spark_window(window))
+        .count()
+}
+
+fn visible_window_count(plan: &CodingPlan, secondary_limits_visible: bool) -> usize {
+    plan.windows
+        .iter()
+        .filter(|window| window_is_visible(window, secondary_limits_visible))
+        .count()
+}
+
+fn secondary_status_row(
+    count: usize,
+    visible: bool,
+    palette: Palette,
+    language: Language,
+) -> Vec<Span<'static>> {
+    vec![
+        Span::raw("  "),
+        Span::styled(
+            language.secondary_limits_status(count, visible),
+            Style::default().fg(palette.muted),
+        ),
+    ]
 }
 
 fn window_accent(window: &UsageWindow, default: Color, palette: Palette) -> Color {
@@ -621,9 +747,22 @@ fn render_detail(
     }
 
     if let Some(plan) = &state.plan {
+        let secondary_limits_visible = app.secondary_limits_visible();
+        let secondary_count = secondary_window_count(plan);
+        if secondary_count > 0 && next_y < area.height {
+            render_line(
+                frame,
+                row(area, next_y),
+                secondary_status_row(secondary_count, secondary_limits_visible, palette, language),
+                palette.background,
+            );
+            next_y += 1;
+        }
+
         let labels = plan
             .windows
             .iter()
+            .filter(|window| window_is_visible(window, secondary_limits_visible))
             .map(|window| localized_window_label(window, language))
             .collect::<Vec<_>>();
         let metric_label_width = copy.quota.width().max(copy.time.width());
@@ -638,14 +777,20 @@ fn render_detail(
             reset: plan
                 .windows
                 .iter()
+                .filter(|window| window_is_visible(window, secondary_limits_visible))
                 .map(|window| reset_text(window.resets_at, language).width())
                 .max()
                 .unwrap_or(0),
         };
+        let visible_count = visible_window_count(plan, secondary_limits_visible);
         let available_rows = usize::from(area.height.saturating_sub(next_y));
-        let show_trends =
-            area.width >= 40 && available_rows >= plan.windows.len().saturating_mul(3);
-        for (window, label) in plan.windows.iter().zip(labels) {
+        let show_trends = area.width >= 40 && available_rows >= visible_count.saturating_mul(3);
+        for (window, label) in plan
+            .windows
+            .iter()
+            .filter(|window| window_is_visible(window, secondary_limits_visible))
+            .zip(labels)
+        {
             if next_y.saturating_add(1) >= area.height {
                 break;
             }
@@ -1243,6 +1388,12 @@ mod tests {
         app
     }
 
+    fn app_with_all_codex_windows(values: &[u8]) -> App {
+        let mut app = app_with_codex_windows(values);
+        app.toggle_secondary_limits();
+        app
+    }
+
     fn populated_app() -> App {
         app_with_codex_windows(&[71, 52])
     }
@@ -1301,21 +1452,35 @@ mod tests {
     }
 
     #[test]
-    fn two_plans_fit_in_four_comparison_rows() {
-        let backend = draw(&populated_app(), 100, 5);
-        assert!(text(&backend, 0).contains("Codex") && text(&backend, 0).contains("Q "));
-        assert!(text(&backend, 1).contains("T ") && !text(&backend, 1).contains("Q "));
-        assert!(text(&backend, 2).contains("Claude") && text(&backend, 2).contains("Q "));
-        assert!(text(&backend, 3).contains("T ") && !text(&backend, 3).contains("Q "));
+    fn secondary_limits_hide_by_default_and_toggle_without_losing_plans() {
+        let mut app = app_with_codex_windows(&[71, 52, 33]);
+        let hidden = draw(&app, 100, 6);
+        let hidden_text = snapshot_text(&hidden);
+        assert!(text(&hidden, 0).contains("Codex") && text(&hidden, 0).contains("Q "));
+        assert!(text(&hidden, 1).contains("T ") && !text(&hidden, 1).contains("Q "));
+        assert!(text(&hidden, 2).contains("2 secondary limits hidden · s Show"));
+        assert!(text(&hidden, 3).contains("Claude") && text(&hidden, 3).contains("Q "));
+        assert!(text(&hidden, 4).contains("T ") && !text(&hidden, 4).contains("Q "));
+        assert!(!hidden_text.contains("Spark"), "{hidden_text:?}");
+
+        app.toggle_secondary_limits();
+        let shown = draw(&app, 100, 10);
+        let shown_text = snapshot_text(&shown);
+        assert_eq!(shown_text.matches("Spark").count(), 2, "{shown_text:?}");
+        assert!(text(&shown, 6).contains("2 secondary limits shown · s Hide"));
+
+        app.toggle_secondary_limits();
+        let hidden_again = snapshot_text(&draw(&app, 100, 6));
+        assert!(!hidden_again.contains("Spark"), "{hidden_again:?}");
     }
 
     #[test]
     fn narrow_layout_keeps_vertical_comparison_for_every_plan() {
-        let backend = draw(&app_with_codex_windows(&[71, 52, 33]), 24, 5);
+        let backend = draw(&app_with_all_codex_windows(&[71, 52, 33]), 24, 6);
         let codex_quota = text(&backend, 0).replace(' ', "");
         let codex_time = text(&backend, 1).replace(' ', "");
-        let claude_quota = text(&backend, 2).replace(' ', "");
-        let claude_time = text(&backend, 3).replace(' ', "");
+        let claude_quota = text(&backend, 3).replace(' ', "");
+        let claude_time = text(&backend, 4).replace(' ', "");
         assert!(
             codex_quota.contains("CodexQ")
                 && codex_quota.contains("71%")
@@ -1341,7 +1506,7 @@ mod tests {
 
     #[test]
     fn three_windows_stack_quota_directly_above_time() {
-        let backend = draw(&app_with_codex_windows(&[71, 52, 33]), 60, 9);
+        let backend = draw(&app_with_all_codex_windows(&[71, 52, 33]), 60, 10);
         let pairs = [
             (0, 1, "Codex", "71%", "1%"),
             (2, 3, "Spark", "52%", "40%"),
@@ -1364,25 +1529,26 @@ mod tests {
         );
         assert_eq!(bar_color(&backend, 2), test_palette().spark_short);
         assert_eq!(bar_color(&backend, 4), test_palette().spark_long);
-        assert!(text(&backend, 6).contains("Claude"));
-        assert!(text(&backend, 8).replace(' ', "").contains("EnterDetails"));
+        assert!(text(&backend, 6).contains("2 secondary limits shown · s Hide"));
+        assert!(text(&backend, 7).contains("Claude"));
+        assert!(text(&backend, 9).replace(' ', "").contains("EnterDetails"));
     }
 
     #[test]
     fn short_viewport_uses_two_compact_metric_rows_per_plan() {
-        let backend = draw(&app_with_codex_windows(&[71, 52, 33]), 60, 5);
+        let backend = draw(&app_with_all_codex_windows(&[71, 52, 33]), 60, 6);
         let codex_quota = text(&backend, 0);
         let codex_time = text(&backend, 1);
-        let claude_quota = text(&backend, 2);
-        let claude_time = text(&backend, 3);
+        let claude_quota = text(&backend, 3);
+        let claude_time = text(&backend, 4);
         assert!(
             codex_quota.contains("Q") && codex_quota.contains("71%") && codex_quota.contains("33%")
         );
         assert!(codex_time.contains("T") && codex_time.contains("40%"));
+        assert!(text(&backend, 2).contains("2 secondary limits shown · s Hide"));
         assert!(claude_quota.contains("Claude") && claude_quota.contains("Q"));
         assert!(claude_time.contains("T") && !claude_time.contains("Q"));
     }
-
     #[test]
     fn selection_scrolls_past_a_stacked_plan_as_one_card() {
         let mut app = app_with_codex_windows(&[71, 52, 33]);
@@ -1410,52 +1576,58 @@ mod tests {
 
     #[test]
     fn selection_has_a_marker_and_surface_background() {
-        let backend = draw(&populated_app(), 60, 5);
+        let backend = draw(&populated_app(), 60, 6);
         assert_eq!(backend.buffer().cell((0, 0)).unwrap().symbol(), "›");
+        for row_index in 0..=2 {
+            assert_eq!(
+                backend.buffer().cell((0, row_index)).unwrap().bg,
+                test_palette().surface
+            );
+        }
         assert_eq!(
-            backend.buffer().cell((0, 0)).unwrap().bg,
-            test_palette().surface
-        );
-        assert_eq!(
-            backend.buffer().cell((0, 1)).unwrap().bg,
-            test_palette().surface
-        );
-        assert_eq!(
-            backend.buffer().cell((0, 2)).unwrap().bg,
+            backend.buffer().cell((0, 3)).unwrap().bg,
             test_palette().background
         );
     }
 
     #[test]
     fn provider_names_use_provider_accents() {
-        let backend = draw(&populated_app(), 60, 5);
+        let backend = draw(&populated_app(), 60, 6);
         assert_eq!(
             backend.buffer().cell((2, 0)).unwrap().fg,
             provider_accent("openai", test_palette())
         );
         assert_eq!(
-            backend.buffer().cell((2, 2)).unwrap().fg,
+            backend.buffer().cell((2, 3)).unwrap().fg,
             provider_accent("anthropic", test_palette())
         );
     }
 
     #[test]
-    fn detail_view_expands_windows_and_reset_information() {
+    fn detail_view_hides_secondary_windows_until_toggled() {
         let mut app = populated_app();
         app.toggle_detail();
-        let backend = draw(&app, 100, 6);
-        let rendered = (0..6).map(|y| text(&backend, y)).collect::<String>();
+
+        let hidden = draw(&app, 100, 6);
+        let hidden_text = snapshot_text(&hidden);
+        assert!(text(&hidden, 1).contains("1 secondary limit hidden · s Show"));
+        assert!(!hidden_text.contains("Spark"), "{hidden_text:?}");
+
+        app.toggle_secondary_limits();
+        let backend = draw(&app, 100, 7);
+        let rendered = (0..7).map(|y| text(&backend, y)).collect::<String>();
         let compact = rendered.replace(' ', "");
+        assert!(compact.contains("1secondarylimitshown·sHide"));
         assert!(compact.contains("Codex·7days"), "{rendered:?}");
         assert!(compact.contains("GPT-5.3-Codex-Spark·5hours"));
         assert!(compact.contains("Quota") && compact.contains("Time"));
         assert_eq!(
-            bar_color(&backend, 1),
+            bar_color(&backend, 2),
             provider_accent("openai", test_palette())
         );
-        assert_eq!(bar_color(&backend, 3), test_palette().spark_short);
+        assert_eq!(bar_color(&backend, 4), test_palette().spark_short);
         assert!(compact.contains("Resetsin"));
-        let footer = text(&backend, 5);
+        let footer = text(&backend, 6);
         assert!(footer.replace(' ', "").contains("EscBack"), "{footer:?}");
     }
 
@@ -1633,11 +1805,11 @@ mod tests {
         later.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(3);
         history.record(&later).unwrap();
 
-        let mut app = app_with_codex_windows(&[55, 48]);
+        let mut app = app_with_all_codex_windows(&[55, 48]);
         app.toggle_detail();
-        let backend = draw_with_history(&app, &history, 80, 8);
-        let first_trend = text(&backend, 3);
-        let second_trend = text(&backend, 6);
+        let backend = draw_with_history(&app, &history, 80, 9);
+        let first_trend = text(&backend, 4);
+        let second_trend = text(&backend, 7);
         let first_compact = first_trend.replace(' ', "");
         let second_compact = second_trend.replace(' ', "");
         assert!(contains_braille(&first_trend), "{first_trend:?}");
@@ -1646,7 +1818,7 @@ mod tests {
         assert!(first_compact.contains("71%→55%·−16%"), "{first_trend:?}");
         assert!(second_compact.contains("52%→48%·−4%"), "{second_trend:?}");
         assert!(!first_compact.contains("old→new"));
-        assert!(text(&backend, 7).replace(' ', "").contains("EscBack"));
+        assert!(text(&backend, 8).replace(' ', "").contains("EscBack"));
     }
 
     #[test]
@@ -1662,7 +1834,7 @@ mod tests {
         let mut app = populated_app();
         app.toggle_detail();
         let backend = draw_with_history(&app, &history, 80, 8);
-        let trend = text(&backend, 3);
+        let trend = text(&backend, 4);
         let compact = trend.replace(' ', "");
         assert!(
             compact.contains("Last1second71%·flat·2samples"),
@@ -1676,7 +1848,7 @@ mod tests {
         let mut app = populated_app();
         app.toggle_detail();
         let backend = draw(&app, 80, 8);
-        let trend = text(&backend, 3);
+        let trend = text(&backend, 4);
         let compact = trend.replace(' ', "");
         assert!(compact.contains("Collectinghistory"), "{trend:?}");
         assert!(!contains_braille(&trend), "{trend:?}");
@@ -1722,11 +1894,11 @@ mod tests {
         later.fetched_at = std::time::UNIX_EPOCH + Duration::from_secs(3);
         history.record(&later).unwrap();
 
-        let mut app = app_with_codex_windows(&[68, 49, 31]);
+        let mut app = app_with_all_codex_windows(&[68, 49, 31]);
         app.toggle_detail();
 
-        let tall = draw_with_history(&app, &history, 80, 11);
-        for row_index in [3, 6, 9] {
+        let tall = draw_with_history(&app, &history, 80, 12);
+        for row_index in [4, 7, 10] {
             let row = text(&tall, row_index);
             let compact = row.replace(' ', "");
             assert!(contains_braille(&row), "{row:?}");
@@ -1735,24 +1907,24 @@ mod tests {
                 "{row:?}"
             );
         }
-        assert!(text(&tall, 10).replace(' ', "").contains("EscBack"));
+        assert!(text(&tall, 11).replace(' ', "").contains("EscBack"));
 
-        let short = draw_with_history(&app, &history, 80, 8);
-        let rendered = (0..8).map(|y| text(&short, y)).collect::<String>();
+        let short = draw_with_history(&app, &history, 80, 9);
+        let rendered = (0..9).map(|y| text(&short, y)).collect::<String>();
         let compact = rendered.replace(' ', "");
         assert!(compact.contains("Codex·7days"), "{rendered:?}");
         assert_eq!(compact.matches("GPT-5.3-Codex-Spark").count(), 2);
         assert!(!contains_braille(&rendered), "{rendered:?}");
-        assert!(text(&short, 7).replace(' ', "").contains("EscBack"));
+        assert!(text(&short, 8).replace(' ', "").contains("EscBack"));
     }
 
     #[test]
     fn detail_columns_align_quota_directly_above_time() {
-        let mut app = app_with_codex_windows(&[71, 52, 33]);
+        let mut app = app_with_all_codex_windows(&[71, 52, 33]);
         app.toggle_detail();
-        let backend = draw(&app, 100, 8);
+        let backend = draw(&app, 100, 9);
 
-        for (quota_row, time_row) in [(1, 2), (3, 4), (5, 6)] {
+        for (quota_row, time_row) in [(2, 3), (4, 5), (6, 7)] {
             let quota = text(&backend, quota_row);
             let time = text(&backend, time_row);
             assert!(
@@ -1796,45 +1968,45 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_narrow_list_at_40_by_5() {
-        let backend = draw(&app_with_codex_windows(&[71, 52, 33]), 40, 5);
-        assert_snapshot!("narrow_list_40x5", snapshot_text(&backend));
+    fn snapshot_narrow_list_at_40_by_6() {
+        let backend = draw(&app_with_codex_windows(&[71, 52, 33]), 40, 6);
+        assert_snapshot!("narrow_list_40x6", snapshot_text(&backend));
     }
 
     #[test]
-    fn snapshot_three_window_detail_at_60_by_8() {
-        let mut app = app_with_codex_windows(&[71, 52, 33]);
+    fn snapshot_three_window_detail_at_60_by_9() {
+        let mut app = app_with_all_codex_windows(&[71, 52, 33]);
         app.toggle_detail();
-        let backend = draw(&app, 60, 8);
-        assert_snapshot!("three_window_detail_60x8", snapshot_text(&backend));
+        let backend = draw(&app, 60, 9);
+        assert_snapshot!("three_window_detail_60x9", snapshot_text(&backend));
     }
 
     #[test]
-    fn snapshot_braille_trend_at_80_by_11() {
+    fn snapshot_braille_trend_at_80_by_12() {
         let history = usage_history(&[&[71, 52, 33], &[70, 50, 32], &[68, 49, 31]]);
-        let mut app = app_with_codex_windows(&[68, 49, 31]);
+        let mut app = app_with_all_codex_windows(&[68, 49, 31]);
         app.toggle_detail();
-        let backend = draw_with_history(&app, &history, 80, 11);
-        assert_snapshot!("braille_trend_80x11", snapshot_text(&backend));
+        let backend = draw_with_history(&app, &history, 80, 12);
+        assert_snapshot!("braille_trend_80x12", snapshot_text(&backend));
     }
 
     #[test]
-    fn snapshot_flat_history_at_80_by_11() {
+    fn snapshot_flat_history_at_80_by_12() {
         let history = usage_history(&[&[71, 52, 33], &[71, 52, 33], &[71, 52, 33]]);
-        let mut app = app_with_codex_windows(&[71, 52, 33]);
+        let mut app = app_with_all_codex_windows(&[71, 52, 33]);
         app.toggle_detail();
-        let backend = draw_with_history(&app, &history, 80, 11);
-        assert_snapshot!("flat_history_80x11", snapshot_text(&backend));
+        let backend = draw_with_history(&app, &history, 80, 12);
+        assert_snapshot!("flat_history_80x12", snapshot_text(&backend));
     }
 
     #[test]
-    fn snapshot_chinese_detail_at_80_by_11() {
+    fn snapshot_chinese_detail_at_80_by_12() {
         let history = usage_history(&[&[71, 52, 33], &[70, 50, 32], &[68, 49, 31]]);
-        let mut app = app_with_codex_windows(&[68, 49, 31]);
+        let mut app = app_with_all_codex_windows(&[68, 49, 31]);
         app.set_language(Language::Chinese);
         app.toggle_detail();
-        let backend = draw_with_history(&app, &history, 80, 11);
-        assert_snapshot!("chinese_detail_80x11", snapshot_text(&backend));
+        let backend = draw_with_history(&app, &history, 80, 12);
+        assert_snapshot!("chinese_detail_80x12", snapshot_text(&backend));
     }
 
     #[test]

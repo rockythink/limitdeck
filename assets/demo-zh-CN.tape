@@ -12,5 +12,7 @@ Set Padding 12
 Type "LC_ALL=zh_CN.UTF-8 NO_COLOR= TERM=xterm-256color target/release/limitdeck"
 Enter
 Sleep 4s
+Type "s"
+Sleep 2s
 Enter
 Sleep 2s

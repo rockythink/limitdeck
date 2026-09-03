@@ -180,6 +180,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
                 app.cycle_language();
                 redraw = true;
             }
+            KeyCode::Char('s') => {
+                app.toggle_secondary_limits();
+                redraw = true;
+            }
             KeyCode::Char('r') if !app.worker_disconnected() => {
                 request_refresh(&worker, &mut app);
                 next_refresh = Instant::now() + REFRESH_INTERVAL;

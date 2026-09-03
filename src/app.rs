@@ -94,6 +94,7 @@ pub struct App {
     detail_open: bool,
     theme: Theme,
     language: Language,
+    secondary_limits_visible: bool,
     worker_disconnected: bool,
 }
 
@@ -111,6 +112,7 @@ impl App {
             detail_open: false,
             theme: Theme::default(),
             language: Language::detect(),
+            secondary_limits_visible: false,
             worker_disconnected: false,
         }
     }
@@ -145,6 +147,14 @@ impl App {
 
     pub fn cycle_language(&mut self) {
         self.language = self.language.next();
+    }
+
+    pub fn secondary_limits_visible(&self) -> bool {
+        self.secondary_limits_visible
+    }
+
+    pub fn toggle_secondary_limits(&mut self) {
+        self.secondary_limits_visible = !self.secondary_limits_visible;
     }
 
     #[cfg(test)]
@@ -437,7 +447,6 @@ mod tests {
         empty.toggle_detail();
         assert!(!empty.is_detail_open());
     }
-
     #[test]
     fn theme_cycle_starts_at_rainbow_and_wraps() {
         let mut app = App::new(std::iter::empty::<PlanIdentity>());
@@ -448,6 +457,17 @@ mod tests {
         assert_eq!(app.theme(), Theme::Mono);
         app.cycle_theme();
         assert_eq!(app.theme(), Theme::Rainbow);
+    }
+
+    #[test]
+    fn secondary_limits_are_hidden_by_default_and_toggle_for_the_session() {
+        let mut app = App::new(std::iter::empty::<PlanIdentity>());
+
+        assert!(!app.secondary_limits_visible());
+        app.toggle_secondary_limits();
+        assert!(app.secondary_limits_visible());
+        app.toggle_secondary_limits();
+        assert!(!app.secondary_limits_visible());
     }
 
     #[test]

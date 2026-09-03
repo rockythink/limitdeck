@@ -2,11 +2,11 @@
 source: src/ui.rs
 expression: snapshot_text(&backend)
 ---
-› Codex      7d Q ━━━━━━──  71%  5h Q ━━━━────  52%
-             7d T ────────   1%  5h T ━━━─────  40%
+› Codex      7d Q ━━━━━━──  71%
+             7d T ────────   1%
+  1 secondary limit hidden · s Show
   Claude     5h Q ━━━━━───  63%  7d Q ━━━━━━━─  82%
              5h T ━━━─────  40%  7d T ────────   1%
-
 
 
   ↑↓/jk Select · Enter Details · r Refresh · t Rainbow · l EN · q Quit

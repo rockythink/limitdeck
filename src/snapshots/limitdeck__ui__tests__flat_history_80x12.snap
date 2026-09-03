@@ -3,6 +3,7 @@ source: src/ui.rs
 expression: snapshot_text(&backend)
 ---
 ‹ Codex  Updated just now
+  2 secondary limits shown · s Hide
   Codex · 7 days                 Quota ━━━━━━━━━━━━─────  71%  Resets in 1 hour
                                  Time  ─────────────────   1%
     Last 1 second  71% · flat · 2 samples

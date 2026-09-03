@@ -28,6 +28,25 @@ impl Language {
         }
     }
 
+    pub fn secondary_limits_status(self, count: usize, visible: bool) -> String {
+        match (self, visible, count) {
+            (Self::English, false, 1) => "1 secondary limit hidden · s Show".to_owned(),
+            (Self::English, false, count) => {
+                format!("{count} secondary limits hidden · s Show")
+            }
+            (Self::English, true, 1) => "1 secondary limit shown · s Hide".to_owned(),
+            (Self::English, true, count) => {
+                format!("{count} secondary limits shown · s Hide")
+            }
+            (Self::Chinese, false, count) => {
+                format!("已隐藏 {count} 个次要限额 · s 显示")
+            }
+            (Self::Chinese, true, count) => {
+                format!("已显示 {count} 个次要限额 · s 隐藏")
+            }
+        }
+    }
+
     pub const fn copy(self) -> UiCopy {
         match self {
             Self::English => UiCopy {
@@ -117,5 +136,25 @@ mod tests {
     fn language_cycle_wraps() {
         assert_eq!(Language::English.next(), Language::Chinese);
         assert_eq!(Language::Chinese.next(), Language::English);
+    }
+
+    #[test]
+    fn secondary_limit_status_is_localized_for_visibility_and_count() {
+        assert_eq!(
+            Language::English.secondary_limits_status(1, false),
+            "1 secondary limit hidden · s Show"
+        );
+        assert_eq!(
+            Language::English.secondary_limits_status(2, true),
+            "2 secondary limits shown · s Hide"
+        );
+        assert_eq!(
+            Language::Chinese.secondary_limits_status(2, false),
+            "已隐藏 2 个次要限额 · s 显示"
+        );
+        assert_eq!(
+            Language::Chinese.secondary_limits_status(1, true),
+            "已显示 1 个次要限额 · s 隐藏"
+        );
     }
 }

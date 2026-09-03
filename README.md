@@ -127,6 +127,10 @@ Every reset window places two remaining percentages on vertically aligned rows u
 
 The list and detail views place quota above time so their bars share the same starting point and are directly comparable. LimitDeck does not classify usage or recommend what to do.
 
+### Secondary limits
+
+GPT-5.3-Codex-Spark windows are treated as secondary limits and hidden by default. When they are available, a neutral status row reports how many are hidden. Press <kbd>s</kbd> to show or hide them in both the list and detail views. This is a session-only display choice; data collection and local history are unchanged.
+
 ### Themes
 
 Press <kbd>t</kbd> to cycle through:
@@ -147,6 +151,7 @@ Theme changes apply immediately to the list and detail views for the current ses
 | <kbd>Enter</kbd> | Open or close plan details |
 | <kbd>Esc</kbd> | Return to the list, then exit |
 | <kbd>r</kbd> | Refresh sources |
+| <kbd>s</kbd> | Show or hide secondary limits |
 | <kbd>t</kbd> | Cycle themes |
 | <kbd>l</kbd> | Switch between English and Chinese |
 | <kbd>q</kbd> | Exit |
