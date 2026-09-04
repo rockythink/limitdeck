@@ -9,4 +9,4 @@ expression: snapshot_text(&backend)
              5h T ━━━─────  40%  7d T ────────   1%
 
 
-  ↑↓/jk Select · Enter Details · r Refresh · t Rainbow · l EN · q Quit
+  ↑↓ Move · Enter Details · m View · r Refresh · ? · q

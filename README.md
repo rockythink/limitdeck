@@ -94,6 +94,8 @@ Press <kbd>m</kbd> or <kbd>Tab</kbd> to switch between subscription quotas and m
 
 The line below the tabs shows the selected model's statistics period: its earliest and latest locally observed usage. Each source reports all usage still present in its local records, so older agents can remain visible even when they were not used during the selected model's period.
 
+Model usage defaults to the last 30 days. Press <kbd>f</kbd> to cycle through **24h**, **7d**, **30d**, and **All**. The status line reports active models and how many older models are hidden. Filtering changes only the view; it never deletes local records.
+
 | Agent | Source | Coverage |
 | --- | --- | --- |
 | OMP | `omp stats --json` | Requests, tokens, cache, errors, cost, and timing |
@@ -166,7 +168,7 @@ Press <kbd>t</kbd> to cycle through:
 | **Midnight** | Restrained, cool-toned dark palette |
 | **Mono** | High-contrast grayscale |
 
-Theme changes apply immediately to the list and detail views for the current session. LimitDeck respects the [`NO_COLOR`](https://no-color.org/) convention; unset it to display theme colors.
+Theme changes apply immediately and are restored the next time LimitDeck starts. LimitDeck respects the [`NO_COLOR`](https://no-color.org/) convention; unset it to display theme colors.
 
 ### Controls
 
@@ -177,12 +179,16 @@ Theme changes apply immediately to the list and detail views for the current ses
 | <kbd>Esc</kbd> | Return to the list, then exit |
 | <kbd>r</kbd> | Refresh sources |
 | <kbd>m</kbd> / <kbd>Tab</kbd> | Switch between quotas and model usage |
+| <kbd>f</kbd> | Cycle the model usage range through 24h, 7d, 30d, and All |
 | <kbd>s</kbd> | Show or hide secondary limits |
 | <kbd>t</kbd> | Cycle themes |
 | <kbd>l</kbd> | Switch between English and Chinese |
+| <kbd>?</kbd> | Open or close the contextual keyboard help |
 | <kbd>q</kbd> | Exit |
 
 Narrow terminals retain the vertical quota/time comparison in a compact form. The model view follows the current selection: widths below 64 columns use a focused metric card, widths from 64 to 95 columns combine selected-model metrics with a scroll-following summary, and wider terminals show the full table. Footer labels also shorten before they would clip.
+
+Theme, language, model time range, and secondary-limit visibility are stored at `$XDG_CONFIG_HOME/limitdeck/config.json`, or `~/.config/limitdeck/config.json` when `XDG_CONFIG_HOME` is unset. Invalid or unsupported preference files are ignored and replaced by safe defaults on the next preference change.
 
 ### Local quota history
 
@@ -205,7 +211,7 @@ LimitDeck retains the minimum state needed to draw the dashboard.
 | Agent, provider, model ID, and aggregate token counters | Prompts, responses, tool output, and reasoning content |
 | Remaining percentages, reset times, and usage timestamps | Organization and plan tier |
 | Locally reported model cost | Provider billing statements |
-| History timestamps and availability state | Raw credentials and provider responses |
+| History timestamps, availability state, and interface preferences | Raw credentials and provider responses |
 
 Parser inputs and subprocess output are size-bounded. Child processes have explicit timeouts and are reaped on exit.
 

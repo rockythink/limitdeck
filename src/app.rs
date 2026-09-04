@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     sync::{
@@ -5,7 +6,7 @@ use std::{
         Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use crate::{
@@ -95,12 +96,55 @@ pub enum DashboardView {
     Quotas,
     Models,
 }
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelTimeRange {
+    Hours24,
+    Days7,
+    #[default]
+    Days30,
+    All,
+}
+
+impl ModelTimeRange {
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Hours24 => Self::Days7,
+            Self::Days7 => Self::Days30,
+            Self::Days30 => Self::All,
+            Self::All => Self::Hours24,
+        }
+    }
+
+    pub const fn label(self, language: Language) -> &'static str {
+        match (self, language) {
+            (Self::Hours24, _) => "24h",
+            (Self::Days7, _) => "7d",
+            (Self::Days30, _) => "30d",
+            (Self::All, Language::English) => "All",
+            (Self::All, Language::Chinese) => "全部",
+        }
+    }
+
+    fn includes(self, last_used_at: Option<SystemTime>, now: SystemTime) -> bool {
+        let duration = match self {
+            Self::Hours24 => Duration::from_secs(24 * 60 * 60),
+            Self::Days7 => Duration::from_secs(7 * 24 * 60 * 60),
+            Self::Days30 => Duration::from_secs(30 * 24 * 60 * 60),
+            Self::All => return true,
+        };
+        last_used_at.is_none_or(|last| now.duration_since(last).map_or(true, |age| age <= duration))
+    }
+}
 pub struct App {
     plans: Vec<PlanState>,
     selected: usize,
     model_usage: Vec<ModelUsage>,
     selected_model: usize,
+    visible_model_indices: Vec<usize>,
+    model_time_range: ModelTimeRange,
     view: DashboardView,
+    help_open: bool,
     detail_open: bool,
     theme: Theme,
     language: Language,
@@ -120,7 +164,10 @@ impl App {
             selected: 0,
             model_usage: Vec::new(),
             selected_model: 0,
+            visible_model_indices: Vec::new(),
+            model_time_range: ModelTimeRange::default(),
             view: DashboardView::default(),
+            help_open: false,
             detail_open: false,
             theme: Theme::default(),
             language: Language::detect(),
@@ -143,8 +190,36 @@ impl App {
         self.detail_open = false;
     }
 
-    pub fn model_usage(&self) -> &[ModelUsage] {
-        &self.model_usage
+    pub fn visible_model_usage(&self) -> impl ExactSizeIterator<Item = &ModelUsage> {
+        self.visible_model_indices
+            .iter()
+            .map(|&index| &self.model_usage[index])
+    }
+
+    pub fn visible_model_count(&self) -> usize {
+        self.visible_model_indices.len()
+    }
+
+    pub fn hidden_model_count(&self) -> usize {
+        self.model_usage
+            .len()
+            .saturating_sub(self.visible_model_indices.len())
+    }
+
+    pub fn selected_model_usage(&self) -> Option<&ModelUsage> {
+        self.visible_model_indices
+            .get(self.selected_model)
+            .map(|&index| &self.model_usage[index])
+    }
+
+    pub fn model_time_range(&self) -> ModelTimeRange {
+        self.model_time_range
+    }
+
+    pub fn cycle_model_time_range(&mut self) {
+        let selected_raw = self.visible_model_indices.get(self.selected_model).copied();
+        self.model_time_range = self.model_time_range.next();
+        self.rebuild_visible_models(selected_raw);
     }
 
     pub fn selected_model_index(&self) -> usize {
@@ -161,6 +236,19 @@ impl App {
 
     pub fn is_detail_open(&self) -> bool {
         self.detail_open
+    }
+    pub fn is_help_open(&self) -> bool {
+        self.help_open
+    }
+
+    pub fn toggle_help(&mut self) {
+        self.help_open = !self.help_open;
+    }
+
+    pub fn close_help(&mut self) -> bool {
+        let was_open = self.help_open;
+        self.help_open = false;
+        was_open
     }
 
     pub fn theme(&self) -> Theme {
@@ -186,6 +274,19 @@ impl App {
     pub fn toggle_secondary_limits(&mut self) {
         self.secondary_limits_visible = !self.secondary_limits_visible;
     }
+    pub(crate) fn apply_preferences(
+        &mut self,
+        theme: Theme,
+        language: Language,
+        secondary_limits_visible: bool,
+        model_time_range: ModelTimeRange,
+    ) {
+        self.theme = theme;
+        self.language = language;
+        self.secondary_limits_visible = secondary_limits_visible;
+        self.model_time_range = model_time_range;
+        self.rebuild_visible_models(None);
+    }
 
     #[cfg(test)]
     pub(crate) fn set_language(&mut self, language: Language) {
@@ -196,8 +297,8 @@ impl App {
             DashboardView::Quotas if !self.plans.is_empty() => {
                 self.selected = (self.selected + 1) % self.plans.len();
             }
-            DashboardView::Models if !self.model_usage.is_empty() => {
-                self.selected_model = (self.selected_model + 1) % self.model_usage.len();
+            DashboardView::Models if !self.visible_model_indices.is_empty() => {
+                self.selected_model = (self.selected_model + 1) % self.visible_model_indices.len();
             }
             _ => {}
         }
@@ -208,9 +309,9 @@ impl App {
             DashboardView::Quotas if !self.plans.is_empty() => {
                 self.selected = (self.selected + self.plans.len() - 1) % self.plans.len();
             }
-            DashboardView::Models if !self.model_usage.is_empty() => {
-                self.selected_model =
-                    (self.selected_model + self.model_usage.len() - 1) % self.model_usage.len();
+            DashboardView::Models if !self.visible_model_indices.is_empty() => {
+                self.selected_model = (self.selected_model + self.visible_model_indices.len() - 1)
+                    % self.visible_model_indices.len();
             }
             _ => {}
         }
@@ -275,11 +376,34 @@ impl App {
                 .then_with(|| left.agent_name.cmp(&right.agent_name))
                 .then_with(|| left.model_id.cmp(&right.model_id))
         });
-        self.selected_model = self
-            .selected_model
-            .min(self.model_usage.len().saturating_sub(1));
+        self.rebuild_visible_models(None);
     }
 
+    fn rebuild_visible_models(&mut self, selected_raw: Option<usize>) {
+        let now = SystemTime::now();
+        self.visible_model_indices.clear();
+        self.visible_model_indices
+            .extend(
+                self.model_usage
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, usage)| {
+                        self.model_time_range
+                            .includes(usage.last_used_at, now)
+                            .then_some(index)
+                    }),
+            );
+        self.selected_model = selected_raw
+            .and_then(|raw| {
+                self.visible_model_indices
+                    .iter()
+                    .position(|&index| index == raw)
+            })
+            .unwrap_or_else(|| {
+                self.selected_model
+                    .min(self.visible_model_indices.len().saturating_sub(1))
+            });
+    }
     pub fn mark_worker_disconnected(&mut self) {
         for plan in &mut self.plans {
             if matches!(plan.phase, PlanPhase::Loading | PlanPhase::Refreshing) {
@@ -608,8 +732,8 @@ mod tests {
                 models: vec![usage("omp", "gpt", 10), usage("omp", "gpt", 20)],
             }),
         });
-        assert_eq!(app.model_usage().len(), 1);
-        assert_eq!(app.model_usage()[0].input_tokens, 30);
+        assert_eq!(app.visible_model_count(), 1);
+        assert_eq!(app.selected_model_usage().unwrap().input_tokens, 30);
 
         app.apply_model_usage_event(ModelUsageEvent {
             source_id: "omp",
@@ -619,10 +743,55 @@ mod tests {
                 models: vec![usage("omp", "gpt", 7)],
             }),
         });
-        assert_eq!(app.model_usage()[0].input_tokens, 7);
+        assert_eq!(app.selected_model_usage().unwrap().input_tokens, 7);
         app.toggle_dashboard_view();
         assert_eq!(app.dashboard_view(), DashboardView::Models);
         app.toggle_detail();
         assert!(!app.is_detail_open());
+    }
+    #[test]
+    fn model_time_ranges_hide_old_usage_without_deleting_it() {
+        let now = SystemTime::now();
+        let usage = |model: &str, tokens: u64, age: Duration| ModelUsage {
+            agent_id: "pi".to_owned(),
+            agent_name: "Pi".to_owned(),
+            provider_id: "openai".to_owned(),
+            model_id: model.to_owned(),
+            requests: 1,
+            failed_requests: 0,
+            input_tokens: tokens,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: None,
+            first_used_at: Some(now - age),
+            last_used_at: Some(now - age),
+        };
+        let mut app = App::new([]);
+        app.apply_model_usage_event(ModelUsageEvent {
+            source_id: "pi",
+            result: Ok(crate::domain::ModelUsageSnapshot {
+                source_id: "pi".to_owned(),
+                fetched_at: now,
+                models: vec![
+                    usage("recent", 3, Duration::from_secs(60 * 60)),
+                    usage("week", 2, Duration::from_secs(3 * 24 * 60 * 60)),
+                    usage("old", 1, Duration::from_secs(60 * 24 * 60 * 60)),
+                ],
+            }),
+        });
+
+        assert_eq!(app.model_time_range(), ModelTimeRange::Days30);
+        assert_eq!(app.visible_model_count(), 2);
+        assert_eq!(app.hidden_model_count(), 1);
+
+        app.cycle_model_time_range();
+        assert_eq!(app.model_time_range(), ModelTimeRange::All);
+        assert_eq!(app.visible_model_count(), 3);
+        app.cycle_model_time_range();
+        assert_eq!(app.model_time_range(), ModelTimeRange::Hours24);
+        assert_eq!(app.visible_model_count(), 1);
+        assert_eq!(app.hidden_model_count(), 2);
+        assert_eq!(app.selected_model_usage().unwrap().model_id, "recent");
     }
 }

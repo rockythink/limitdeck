@@ -13,4 +13,4 @@ expression: snapshot_text(&backend)
   GPT-5.3-Codex-Spark · 7 days   Quota ━━━━━━───────────  33%  Resets in 1 hour
                                  Time  ─────────────────   1%
     Last 1 second  33% · flat · 2 samples
-  Esc Back · r Refresh · t Rainbow · l EN · q Quit
+  Esc Back · m View · r Refresh · ? Help · q Quit

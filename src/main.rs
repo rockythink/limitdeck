@@ -5,6 +5,7 @@ mod domain;
 mod history;
 mod locale;
 mod model_usage;
+mod preferences;
 mod theme;
 mod ui;
 
@@ -15,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use app::{App, PlanEvent, PlanWorker};
+use app::{App, DashboardView, PlanEvent, PlanWorker};
 use crossterm::{
     cursor::Show,
     event::{self, Event, KeyCode, KeyEventKind},
@@ -24,6 +25,7 @@ use crossterm::{
 };
 use history::UsageHistory;
 use model_usage::ModelUsageWorker;
+use preferences::Preferences;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
@@ -112,6 +114,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
     let worker = PlanWorker::spawn(adapters);
     let model_worker = ModelUsageWorker::spawn(adapters::discover_model_usage());
     let mut app = App::new(identities);
+    let preferences = Preferences::load_default();
+    preferences.apply(&mut app);
     let mut history = UsageHistory::load_default();
     let mut next_refresh = Instant::now();
     let mut redraw = true;
@@ -153,6 +157,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        if app.is_help_open() {
+            match key.code {
+                KeyCode::Char('q') => return Ok(()),
+                KeyCode::Esc | KeyCode::Char('?') => {
+                    app.close_help();
+                    redraw = true;
+                }
+                _ => {}
+            }
+            continue;
+        }
 
         match key.code {
             KeyCode::Char('q') => return Ok(()),
@@ -181,14 +196,26 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
             }
             KeyCode::Char('t') => {
                 app.cycle_theme();
+                let _ = preferences.save(&app);
                 redraw = true;
             }
             KeyCode::Char('l') => {
                 app.cycle_language();
+                let _ = preferences.save(&app);
                 redraw = true;
             }
             KeyCode::Char('s') => {
                 app.toggle_secondary_limits();
+                let _ = preferences.save(&app);
+                redraw = true;
+            }
+            KeyCode::Char('f') if app.dashboard_view() == DashboardView::Models => {
+                app.cycle_model_time_range();
+                let _ = preferences.save(&app);
+                redraw = true;
+            }
+            KeyCode::Char('?') => {
+                app.toggle_help();
                 redraw = true;
             }
             KeyCode::Tab | KeyCode::Char('m') => {

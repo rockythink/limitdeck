@@ -11,7 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     adapter::{AdapterError, AdapterErrorKind},
-    app::{App, DashboardView, PlanPhase, PlanState},
+    app::{App, DashboardView, ModelTimeRange, PlanPhase, PlanState},
     domain::{CodingPlan, ModelUsage, UsageStatus, UsageWindow},
     history::{HistorySample, UsageHistory},
     locale::{Language, UiCopy},
@@ -41,20 +41,35 @@ pub fn render(frame: &mut Frame<'_>, app: &App, history: &UsageHistory) {
         (area, None)
     };
 
-    match (app.dashboard_view(), app.is_detail_open()) {
-        (DashboardView::Quotas, true) => {
-            render_detail(frame, content_area, app, history, palette, language);
-        }
-        (DashboardView::Quotas, false) => {
-            render_plan_list(frame, content_area, app, palette, language);
-        }
-        (DashboardView::Models, _) => {
-            render_model_usage(frame, content_area, app, palette, language);
+    if app.is_help_open() {
+        render_help(frame, content_area, palette, language);
+    } else {
+        match (app.dashboard_view(), app.is_detail_open()) {
+            (DashboardView::Quotas, true) => {
+                render_detail(frame, content_area, app, history, palette, language);
+            }
+            (DashboardView::Quotas, false) => {
+                render_plan_list(frame, content_area, app, palette, language);
+            }
+            (DashboardView::Models, _) => {
+                render_model_usage(frame, content_area, app, palette, language);
+            }
         }
     }
 
     if let Some(footer_area) = footer_area {
-        if area.width < 64 {
+        if app.is_help_open() {
+            let footer = match language {
+                Language::English => "  ? / Esc Close · q Quit",
+                Language::Chinese => "  ? / Esc 关闭 · q 退出",
+            };
+            render_line(
+                frame,
+                footer_area,
+                vec![Span::styled(footer, Style::default().fg(palette.muted))],
+                palette.background,
+            );
+        } else if area.width < 90 {
             let footer = compact_footer(
                 area.width,
                 app.dashboard_view(),
@@ -89,24 +104,30 @@ fn compact_footer(
 ) -> &'static str {
     if width < 48 {
         return match (view, detail_open) {
-            (DashboardView::Quotas, true) => "  Esc · m · r · q",
-            (DashboardView::Quotas, false) => "  ↑↓ · Enter · m · r · q",
-            (DashboardView::Models, _) => "  ↑↓ · m · r · q",
+            (DashboardView::Quotas, true) => "  Esc · m · r · ? · q",
+            (DashboardView::Quotas, false) => "  ↑↓ · Enter · m · r · ? · q",
+            (DashboardView::Models, _) => "  ↑↓ · f · m · r · ? · q",
         };
     }
     match (view, detail_open, language) {
         (DashboardView::Quotas, true, Language::English) => {
-            "  Esc Back · m View · r Refresh · q Quit"
+            "  Esc Back · m View · r Refresh · ? Help · q Quit"
         }
-        (DashboardView::Quotas, true, Language::Chinese) => "  Esc 返回 · m 视图 · r 刷新 · q 退出",
+        (DashboardView::Quotas, true, Language::Chinese) => {
+            "  Esc 返回 · m 视图 · r 刷新 · ? 帮助 · q 退出"
+        }
         (DashboardView::Quotas, false, Language::English) => {
-            "  ↑↓ Move · Enter Details · m View · r Refresh · q Quit"
+            "  ↑↓ Move · Enter Details · m View · r Refresh · ? · q"
         }
         (DashboardView::Quotas, false, Language::Chinese) => {
-            "  ↑↓ 选择 · Enter 详情 · m 视图 · r 刷新 · q 退出"
+            "  ↑↓ 选择 · Enter 详情 · m 视图 · r 刷新 · ? · q"
         }
-        (DashboardView::Models, _, Language::English) => "  ↑↓ Move · m View · r Refresh · q Quit",
-        (DashboardView::Models, _, Language::Chinese) => "  ↑↓ 选择 · m 视图 · r 刷新 · q 退出",
+        (DashboardView::Models, _, Language::English) => {
+            "  ↑↓ Move · f Range · m Quotas · r Refresh · ? · q"
+        }
+        (DashboardView::Models, _, Language::Chinese) => {
+            "  ↑↓ 选择 · f 范围 · m 额度 · r 刷新 · ? · q"
+        }
     }
 }
 fn footer_spans(
@@ -152,10 +173,129 @@ fn footer_spans(
             .add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::styled(
+        match language {
+            Language::English => " · ? Help",
+            Language::Chinese => " · ? 帮助",
+        },
+        Style::default().fg(palette.muted),
+    ));
+    spans.push(Span::styled(
         copy.footer_quit,
         Style::default().fg(palette.muted),
     ));
     spans
+}
+
+fn render_help(frame: &mut Frame<'_>, area: Rect, palette: Palette, language: Language) {
+    if area.is_empty() {
+        return;
+    }
+    let lines = if area.width < 64 || area.height < 10 {
+        match language {
+            Language::English => vec![
+                Line::from(Span::styled(
+                    "  LimitDeck Help",
+                    Style::default()
+                        .fg(palette.text)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from("  ↑↓/jk Select · Enter Details"),
+                Line::from("  m Quotas/Models · f Time range"),
+                Line::from("  s Secondary limits · r Refresh"),
+                Line::from("  t Theme · l Language"),
+                Line::from("  ?/Esc Close · q Quit"),
+            ],
+            Language::Chinese => vec![
+                Line::from(Span::styled(
+                    "  LimitDeck 帮助",
+                    Style::default()
+                        .fg(palette.text)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from("  ↑↓/jk 选择 · Enter 详情"),
+                Line::from("  m 额度/模型 · f 时间范围"),
+                Line::from("  s 次要限额 · r 刷新"),
+                Line::from("  t 主题 · l 语言"),
+                Line::from("  ?/Esc 关闭 · q 退出"),
+            ],
+        }
+    } else {
+        match language {
+            Language::English => vec![
+                Line::from(Span::styled(
+                    "  LimitDeck Help",
+                    Style::default()
+                        .fg(palette.text)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  Navigation",
+                    Style::default().fg(palette.warning),
+                )),
+                Line::from("  ↑↓ / j k  Select · Enter  Open details"),
+                Line::from(Span::styled(
+                    "  Views",
+                    Style::default().fg(palette.warning),
+                )),
+                Line::from(
+                    "  m / Tab  Quotas or models · f  Model time range · s  Secondary limits",
+                ),
+                Line::from(Span::styled(
+                    "  Preferences",
+                    Style::default().fg(palette.warning),
+                )),
+                Line::from("  t  Theme · l  Language"),
+                Line::from(Span::styled(
+                    "  Actions",
+                    Style::default().fg(palette.warning),
+                )),
+                Line::from("  r  Refresh · ? / Esc  Close help · q  Quit"),
+            ],
+            Language::Chinese => vec![
+                Line::from(Span::styled(
+                    "  LimitDeck 帮助",
+                    Style::default()
+                        .fg(palette.text)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled("  导航", Style::default().fg(palette.warning))),
+                Line::from("  ↑↓ / j k  选择 · Enter  打开详情"),
+                Line::from(Span::styled("  视图", Style::default().fg(palette.warning))),
+                Line::from("  m / Tab  额度或模型 · f  模型时间范围 · s  次要限额"),
+                Line::from(Span::styled("  偏好", Style::default().fg(palette.warning))),
+                Line::from("  t  主题 · l  语言"),
+                Line::from(Span::styled("  操作", Style::default().fg(palette.warning))),
+                Line::from("  r  刷新 · ? / Esc  关闭帮助 · q  退出"),
+            ],
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(palette.muted).bg(palette.background)),
+        area,
+    );
+}
+
+fn model_filter_status(app: &App, language: Language) -> String {
+    let scope = match (app.model_time_range(), language) {
+        (ModelTimeRange::All, Language::English) => "All history".to_owned(),
+        (ModelTimeRange::All, Language::Chinese) => "全部记录".to_owned(),
+        (range, Language::English) => format!("Last {}", range.label(language)),
+        (range, Language::Chinese) => format!("最近 {}", range.label(language)),
+    };
+    let visible = app.visible_model_count();
+    let hidden = app.hidden_model_count();
+    match (language, hidden) {
+        (Language::English, 0) => format!("  {scope} · {visible} active · f Filter"),
+        (Language::English, hidden) => {
+            format!("  {scope} · {visible} active · {hidden} older hidden · f Filter")
+        }
+        (Language::Chinese, 0) => format!("  {scope} · {visible} 个活跃 · f 筛选"),
+        (Language::Chinese, hidden) => {
+            format!("  {scope} · {visible} 个活跃 · 隐藏 {hidden} 个旧模型 · f 筛选")
+        }
+    }
 }
 
 fn render_model_usage(
@@ -169,11 +309,11 @@ fn render_model_usage(
         return;
     }
     let (quota_tab, models_tab, empty_text, request_label) = match language {
-        Language::English => ("Quotas", "Models", "No local model usage found", "req"),
-        Language::Chinese => ("额度", "模型", "未发现本地模型用量", "次"),
+        Language::English => ("Quotas", "Models", "No model usage in this range", "req"),
+        Language::Chinese => ("额度", "模型", "此时间范围内没有模型用量", "次"),
     };
-    let usages = app.model_usage();
-    if area.width < 64 && !usages.is_empty() {
+    let usage_count = app.visible_model_count();
+    if area.width < 64 && usage_count > 0 {
         render_compact_model_card(frame, area, app, palette, language);
         return;
     }
@@ -190,16 +330,17 @@ fn render_model_usage(
         ),
         Span::styled("   m/Tab", Style::default().fg(palette.warning)),
     ]));
-    if usages.is_empty() {
+    lines.push(Line::from(Span::styled(
+        model_filter_status(app, language),
+        Style::default().fg(palette.muted),
+    )));
+    if usage_count == 0 {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!("  {empty_text}"),
             Style::default().fg(palette.muted),
         )));
-    } else {
-        let selected = usages
-            .get(app.selected_model_index())
-            .expect("selected model index is clamped");
+    } else if let Some(selected) = app.selected_model_usage() {
         lines.push(Line::from(Span::styled(
             statistics_period(selected.first_used_at, selected.last_used_at, language),
             Style::default().fg(palette.muted),
@@ -213,10 +354,10 @@ fn render_model_usage(
         }
         lines.push(Line::from(""));
 
-        let reserved_rows = if detailed { 3 } else { 4 };
+        let reserved_rows = if detailed { 4 } else { 5 };
         let capacity = area.height.saturating_sub(reserved_rows) as usize;
-        let (start, end) = visible_model_window(usages.len(), app.selected_model_index(), capacity);
-        for (index, usage) in usages.iter().enumerate().take(end).skip(start) {
+        let (start, end) = visible_model_window(usage_count, app.selected_model_index(), capacity);
+        for (index, usage) in app.visible_model_usage().enumerate().take(end).skip(start) {
             let is_selected = index == app.selected_model_index();
             let accent = provider_accent(&usage.provider_id, palette);
             let marker = if is_selected { "›" } else { " " };
@@ -273,13 +414,12 @@ fn render_compact_model_card(
     palette: Palette,
     language: Language,
 ) {
-    let usage = app
-        .model_usage()
-        .get(app.selected_model_index())
-        .expect("selected model index is clamped");
-    let (models, quotas, request_label, input_label, output_label, cache_label) = match language {
-        Language::English => ("Models", "Quotas", "req", "In", "Out", "Cache"),
-        Language::Chinese => ("模型", "额度", "次", "入", "出", "缓存"),
+    let Some(usage) = app.selected_model_usage() else {
+        return;
+    };
+    let (models, request_label, input_label, output_label, cache_label) = match language {
+        Language::English => ("Models", "req", "In", "Out", "Cache"),
+        Language::Chinese => ("模型", "次", "入", "出", "缓存"),
     };
     let content_width = area.width.saturating_sub(4) as usize;
     let identity = fit_display_width(
@@ -290,18 +430,16 @@ fn render_compact_model_card(
         Line::from(vec![
             Span::styled(
                 format!(
-                    "  {models} {}/{}",
+                    "  {models} {}/{} · {}",
                     app.selected_model_index() + 1,
-                    app.model_usage().len()
+                    app.visible_model_count(),
+                    app.model_time_range().label(language),
                 ),
                 Style::default()
                     .fg(palette.text)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!(" · m {quotas}"),
-                Style::default().fg(palette.warning),
-            ),
+            Span::styled(" · f", Style::default().fg(palette.warning)),
         ]),
         Line::from(Span::styled(
             format!("  {identity}"),
@@ -2478,6 +2616,7 @@ mod tests {
         let compact = snapshot_text(&compact_backend);
         for expected in [
             "Models 1/1",
+            "· 30d · f",
             "Codex · gpt-test",
             "First 2h ago",
             "In 10",
@@ -2523,5 +2662,27 @@ mod tests {
 
         let rendered = snapshot_text(&draw(&app, 80, 10));
         assert!(rendered.contains("Pi · model-1"), "{rendered:?}");
+    }
+    #[test]
+    fn compact_help_exposes_every_interactive_control() {
+        let mut app = App::new([]);
+        app.set_language(Language::English);
+        app.toggle_help();
+
+        let rendered = snapshot_text(&draw(&app, 40, 8));
+        for expected in [
+            "↑↓/jk Select",
+            "Enter Details",
+            "m Quotas/Models",
+            "f Time range",
+            "s Secondary limits",
+            "r Refresh",
+            "t Theme",
+            "l Language",
+            "?/Esc Close",
+            "q Quit",
+        ] {
+            assert!(rendered.contains(expected), "{rendered:?}");
+        }
     }
 }
