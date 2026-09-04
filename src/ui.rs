@@ -11,8 +11,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     adapter::{AdapterError, AdapterErrorKind},
-    app::{App, PlanPhase, PlanState},
-    domain::{CodingPlan, UsageStatus, UsageWindow},
+    app::{App, DashboardView, PlanPhase, PlanState},
+    domain::{CodingPlan, ModelUsage, UsageStatus, UsageWindow},
     history::{HistorySample, UsageHistory},
     locale::{Language, UiCopy},
     theme::{provider_accent, Palette, Theme},
@@ -41,23 +41,74 @@ pub fn render(frame: &mut Frame<'_>, app: &App, history: &UsageHistory) {
         (area, None)
     };
 
-    if app.is_detail_open() {
-        render_detail(frame, content_area, app, history, palette, language);
-    } else {
-        render_plan_list(frame, content_area, app, palette, language);
+    match (app.dashboard_view(), app.is_detail_open()) {
+        (DashboardView::Quotas, true) => {
+            render_detail(frame, content_area, app, history, palette, language);
+        }
+        (DashboardView::Quotas, false) => {
+            render_plan_list(frame, content_area, app, palette, language);
+        }
+        (DashboardView::Models, _) => {
+            render_model_usage(frame, content_area, app, palette, language);
+        }
     }
 
     if let Some(footer_area) = footer_area {
-        let prefix = if app.is_detail_open() {
-            copy.detail_footer_prefix
+        if area.width < 64 {
+            let footer = compact_footer(
+                area.width,
+                app.dashboard_view(),
+                app.is_detail_open(),
+                language,
+            );
+            render_line(
+                frame,
+                footer_area,
+                vec![Span::styled(footer, Style::default().fg(palette.muted))],
+                palette.background,
+            );
         } else {
-            copy.list_footer_prefix
-        };
-        let spans = footer_spans(prefix, app.theme(), language, copy, palette);
-        render_line(frame, footer_area, spans, palette.background);
+            let prefix = if app.dashboard_view() == DashboardView::Models {
+                copy.model_footer_prefix
+            } else if app.is_detail_open() {
+                copy.detail_footer_prefix
+            } else {
+                copy.list_footer_prefix
+            };
+            let spans = footer_spans(prefix, app.theme(), language, copy, palette);
+            render_line(frame, footer_area, spans, palette.background);
+        }
     }
 }
 
+fn compact_footer(
+    width: u16,
+    view: DashboardView,
+    detail_open: bool,
+    language: Language,
+) -> &'static str {
+    if width < 48 {
+        return match (view, detail_open) {
+            (DashboardView::Quotas, true) => "  Esc · m · r · q",
+            (DashboardView::Quotas, false) => "  ↑↓ · Enter · m · r · q",
+            (DashboardView::Models, _) => "  ↑↓ · m · r · q",
+        };
+    }
+    match (view, detail_open, language) {
+        (DashboardView::Quotas, true, Language::English) => {
+            "  Esc Back · m View · r Refresh · q Quit"
+        }
+        (DashboardView::Quotas, true, Language::Chinese) => "  Esc 返回 · m 视图 · r 刷新 · q 退出",
+        (DashboardView::Quotas, false, Language::English) => {
+            "  ↑↓ Move · Enter Details · m View · r Refresh · q Quit"
+        }
+        (DashboardView::Quotas, false, Language::Chinese) => {
+            "  ↑↓ 选择 · Enter 详情 · m 视图 · r 刷新 · q 退出"
+        }
+        (DashboardView::Models, _, Language::English) => "  ↑↓ Move · m View · r Refresh · q Quit",
+        (DashboardView::Models, _, Language::Chinese) => "  ↑↓ 选择 · m 视图 · r 刷新 · q 退出",
+    }
+}
 fn footer_spans(
     prefix: &'static str,
     theme: Theme,
@@ -107,6 +158,310 @@ fn footer_spans(
     spans
 }
 
+fn render_model_usage(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    palette: Palette,
+    language: Language,
+) {
+    if area.is_empty() {
+        return;
+    }
+    let (quota_tab, models_tab, empty_text, request_label) = match language {
+        Language::English => ("Quotas", "Models", "No local model usage found", "req"),
+        Language::Chinese => ("额度", "模型", "未发现本地模型用量", "次"),
+    };
+    let usages = app.model_usage();
+    if area.width < 64 && !usages.is_empty() {
+        render_compact_model_card(frame, area, app, palette, language);
+        return;
+    }
+
+    let mut lines = Vec::with_capacity(area.height as usize);
+    lines.push(Line::from(vec![
+        Span::styled(format!("  {quota_tab}"), Style::default().fg(palette.muted)),
+        Span::styled("  /  ", Style::default().fg(palette.border)),
+        Span::styled(
+            models_tab,
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("   m/Tab", Style::default().fg(palette.warning)),
+    ]));
+    if usages.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  {empty_text}"),
+            Style::default().fg(palette.muted),
+        )));
+    } else {
+        let selected = usages
+            .get(app.selected_model_index())
+            .expect("selected model index is clamped");
+        lines.push(Line::from(Span::styled(
+            statistics_period(selected.first_used_at, selected.last_used_at, language),
+            Style::default().fg(palette.muted),
+        )));
+        let detailed = area.width >= 96;
+        if !detailed {
+            lines.push(Line::from(Span::styled(
+                compact_model_metrics(selected, language),
+                Style::default().fg(palette.muted),
+            )));
+        }
+        lines.push(Line::from(""));
+
+        let reserved_rows = if detailed { 3 } else { 4 };
+        let capacity = area.height.saturating_sub(reserved_rows) as usize;
+        let (start, end) = visible_model_window(usages.len(), app.selected_model_index(), capacity);
+        for (index, usage) in usages.iter().enumerate().take(end).skip(start) {
+            let is_selected = index == app.selected_model_index();
+            let accent = provider_accent(&usage.provider_id, palette);
+            let marker = if is_selected { "›" } else { " " };
+            let style = Style::default().fg(palette.text).bg(if is_selected {
+                palette.surface
+            } else {
+                palette.background
+            });
+            let metrics = if detailed {
+                format!(
+                    "{:>6} {request_label}  {:>8} in  {:>8} out  {:>8} cache  {:>9}",
+                    format_count(usage.requests),
+                    format_count(usage.input_tokens),
+                    format_count(usage.output_tokens),
+                    format_count(usage.cache_read_tokens),
+                    format_cost(usage.cost_usd),
+                )
+            } else {
+                format!(
+                    "{} tok · {}",
+                    format_count(usage.total_tokens()),
+                    relative_age(usage.last_used_at, language),
+                )
+            };
+            let identity_width = if detailed {
+                42usize
+            } else {
+                (area.width as usize)
+                    .saturating_sub(4 + UnicodeWidthStr::width(metrics.as_str()))
+                    .max(8)
+            };
+            let identity = fit_display_width(
+                &format!("{} · {}", usage.agent_name, usage.model_id),
+                identity_width,
+            );
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {marker} "), style.fg(accent)),
+                Span::styled(format!("{identity:<identity_width$}"), style),
+                Span::styled(" ", style),
+                Span::styled(metrics, style.fg(palette.muted)),
+            ]));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(palette.background)),
+        area,
+    );
+}
+
+fn render_compact_model_card(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    palette: Palette,
+    language: Language,
+) {
+    let usage = app
+        .model_usage()
+        .get(app.selected_model_index())
+        .expect("selected model index is clamped");
+    let (models, quotas, request_label, input_label, output_label, cache_label) = match language {
+        Language::English => ("Models", "Quotas", "req", "In", "Out", "Cache"),
+        Language::Chinese => ("模型", "额度", "次", "入", "出", "缓存"),
+    };
+    let content_width = area.width.saturating_sub(4) as usize;
+    let identity = fit_display_width(
+        &format!("{} · {}", usage.agent_name, usage.model_id),
+        content_width,
+    );
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!(
+                    "  {models} {}/{}",
+                    app.selected_model_index() + 1,
+                    app.model_usage().len()
+                ),
+                Style::default()
+                    .fg(palette.text)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" · m {quotas}"),
+                Style::default().fg(palette.warning),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!("  {identity}"),
+            Style::default().fg(provider_accent(&usage.provider_id, palette)),
+        )),
+        Line::from(Span::styled(
+            compact_statistics_period(usage, language),
+            Style::default().fg(palette.muted),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "  {} {request_label} · {}",
+                format_count(usage.requests),
+                format_cost(usage.cost_usd)
+            ),
+            Style::default().fg(palette.muted),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "  {input_label} {} · {output_label} {}",
+                format_count(usage.input_tokens),
+                format_count(usage.output_tokens)
+            ),
+            Style::default().fg(palette.text),
+        )),
+        Line::from(Span::styled(
+            format!("  {cache_label} {}", format_count(usage.cache_read_tokens)),
+            Style::default().fg(palette.muted),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(palette.background)),
+        area,
+    );
+}
+
+fn compact_model_metrics(usage: &ModelUsage, language: Language) -> String {
+    let request_label = match language {
+        Language::English => "req",
+        Language::Chinese => "次",
+    };
+    format!(
+        "  {} {request_label} · {} in · {} out · {} cache · {}",
+        format_count(usage.requests),
+        format_count(usage.input_tokens),
+        format_count(usage.output_tokens),
+        format_count(usage.cache_read_tokens),
+        format_cost(usage.cost_usd),
+    )
+}
+
+fn compact_statistics_period(usage: &ModelUsage, language: Language) -> String {
+    match (usage.first_used_at, usage.last_used_at, language) {
+        (Some(first), Some(last), Language::English) => format!(
+            "  First {} · latest {}",
+            relative_age(Some(first), language),
+            relative_age(Some(last), language),
+        ),
+        (Some(first), Some(last), Language::Chinese) => format!(
+            "  最早 {} · 最近 {}",
+            relative_age(Some(first), language),
+            relative_age(Some(last), language),
+        ),
+        (_, Some(last), Language::English) => {
+            format!("  Latest {}", relative_age(Some(last), language))
+        }
+        (_, Some(last), Language::Chinese) => {
+            format!("  最近 {}", relative_age(Some(last), language))
+        }
+        (_, _, Language::English) => "  Period unknown".to_owned(),
+        (_, _, Language::Chinese) => "  时间未知".to_owned(),
+    }
+}
+
+fn visible_model_window(total: usize, selected: usize, capacity: usize) -> (usize, usize) {
+    if total == 0 || capacity == 0 {
+        return (0, 0);
+    }
+    let capacity = capacity.min(total);
+    let start = selected.saturating_sub(capacity - 1).min(total - capacity);
+    (start, start + capacity)
+}
+fn statistics_period(
+    first_used_at: Option<SystemTime>,
+    last_used_at: Option<SystemTime>,
+    language: Language,
+) -> String {
+    match (first_used_at, last_used_at, language) {
+        (Some(first), Some(last), Language::English) => format!(
+            "  Statistics period · first {} · latest {}",
+            relative_age(first.into(), Language::English),
+            relative_age(last.into(), Language::English),
+        ),
+        (Some(first), Some(last), Language::Chinese) => format!(
+            "  统计区间 · 最早 {} · 最近 {}",
+            relative_age(first.into(), Language::Chinese),
+            relative_age(last.into(), Language::Chinese),
+        ),
+        (Some(first), None, Language::English) => {
+            format!(
+                "  Statistics period · since {}",
+                relative_age(first.into(), Language::English)
+            )
+        }
+        (Some(first), None, Language::Chinese) => {
+            format!(
+                "  统计区间 · 始于 {}",
+                relative_age(first.into(), Language::Chinese)
+            )
+        }
+        (None, Some(last), Language::English) => {
+            format!(
+                "  Statistics time · latest {}",
+                relative_age(last.into(), Language::English)
+            )
+        }
+        (None, Some(last), Language::Chinese) => {
+            format!(
+                "  统计时间 · 最近 {}",
+                relative_age(last.into(), Language::Chinese)
+            )
+        }
+        (None, None, Language::English) => "  Statistics period · unknown".to_owned(),
+        (None, None, Language::Chinese) => "  统计区间 · 未知".to_owned(),
+    }
+}
+fn format_count(value: u64) -> String {
+    if value >= 1_000_000_000 {
+        format!("{:.1}B", value as f64 / 1_000_000_000.0)
+    } else if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}K", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_cost(cost: Option<f64>) -> String {
+    cost.filter(|value| value.is_finite())
+        .map_or_else(|| "—".to_owned(), |value| format!("USD {value:.2}"))
+}
+
+fn relative_age(value: Option<SystemTime>, language: Language) -> String {
+    let Some(value) = value else {
+        return "—".to_owned();
+    };
+    let age = SystemTime::now().duration_since(value).unwrap_or_default();
+    let (value, english, chinese) = if age < Duration::from_secs(60 * 60) {
+        (age.as_secs() / 60, "m ago", "分钟前")
+    } else if age < Duration::from_secs(24 * 60 * 60) {
+        (age.as_secs() / 3_600, "h ago", "小时前")
+    } else {
+        (age.as_secs() / 86_400, "d ago", "天前")
+    };
+    match language {
+        Language::English => format!("{value}{english}"),
+        Language::Chinese => format!("{value}{chinese}"),
+    }
+}
 fn render_plan_list(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1324,7 +1679,8 @@ mod tests {
     use super::*;
     use crate::{
         app::PlanEvent,
-        domain::{CodingPlan, PlanIdentity},
+        domain::{CodingPlan, ModelUsage, ModelUsageSnapshot, PlanIdentity},
+        model_usage::ModelUsageEvent,
         theme::Theme,
     };
     use ratatui::{backend::TestBackend, Terminal};
@@ -2083,5 +2439,89 @@ mod tests {
         for forbidden in ["token", "stderr", "/Users/", "@"] {
             assert!(!rendered.contains(forbidden), "{rendered:?}");
         }
+    }
+    #[test]
+    fn model_view_shows_selected_statistics_period() {
+        let now = SystemTime::now();
+        let mut app = App::new([]);
+        app.set_language(Language::English);
+        app.apply_model_usage_event(ModelUsageEvent {
+            source_id: "codex",
+            result: Ok(ModelUsageSnapshot {
+                source_id: "codex".to_owned(),
+                fetched_at: now,
+                models: vec![ModelUsage {
+                    agent_id: "codex".to_owned(),
+                    agent_name: "Codex".to_owned(),
+                    provider_id: "openai".to_owned(),
+                    model_id: "gpt-test".to_owned(),
+                    requests: 1,
+                    failed_requests: 0,
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    cost_usd: None,
+                    first_used_at: Some(now - Duration::from_secs(150 * 60)),
+                    last_used_at: Some(now - Duration::from_secs(90 * 60)),
+                }],
+            }),
+        });
+        app.toggle_dashboard_view();
+
+        let backend = draw(&app, 100, 8);
+        let rendered = snapshot_text(&backend);
+        assert!(rendered.contains("Statistics period"), "{rendered:?}");
+        assert!(rendered.contains("first 2h ago"), "{rendered:?}");
+        assert!(rendered.contains("latest 1h ago"), "{rendered:?}");
+        let compact_backend = draw(&app, 40, 8);
+        let compact = snapshot_text(&compact_backend);
+        for expected in [
+            "Models 1/1",
+            "Codex · gpt-test",
+            "First 2h ago",
+            "In 10",
+            "Cache 0",
+        ] {
+            assert!(compact.contains(expected), "{compact:?}");
+        }
+    }
+    #[test]
+    fn compact_model_list_keeps_the_selected_entry_visible() {
+        let now = SystemTime::now();
+        let models = (0_u64..12)
+            .map(|index| ModelUsage {
+                agent_id: "pi".to_owned(),
+                agent_name: "Pi".to_owned(),
+                provider_id: "openai".to_owned(),
+                model_id: format!("model-{index}"),
+                requests: 1,
+                failed_requests: 0,
+                input_tokens: index + 1,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                cost_usd: None,
+                first_used_at: Some(now),
+                last_used_at: Some(now),
+            })
+            .collect();
+        let mut app = App::new([]);
+        app.set_language(Language::English);
+        app.apply_model_usage_event(ModelUsageEvent {
+            source_id: "pi",
+            result: Ok(ModelUsageSnapshot {
+                source_id: "pi".to_owned(),
+                fetched_at: now,
+                models,
+            }),
+        });
+        app.toggle_dashboard_view();
+        for _ in 0..10 {
+            app.select_next();
+        }
+
+        let rendered = snapshot_text(&draw(&app, 80, 10));
+        assert!(rendered.contains("Pi · model-1"), "{rendered:?}");
     }
 }

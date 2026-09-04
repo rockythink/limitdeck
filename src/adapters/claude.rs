@@ -1,5 +1,7 @@
 use std::{
+    collections::hash_map::DefaultHasher,
     env, fs,
+    hash::{Hash, Hasher},
     io::{self, Read},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -8,8 +10,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    adapter::{AdapterError, AdapterErrorKind, PlanAdapter},
-    domain::{CodingPlan, PlanIdentity, UsageStatus, UsageWindow},
+    adapter::{AdapterError, AdapterErrorKind, ModelUsageAdapter, PlanAdapter},
+    adapters::usage_common::cache_dir,
+    domain::{CodingPlan, ModelUsage, ModelUsageSnapshot, PlanIdentity, UsageStatus, UsageWindow},
 };
 
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
@@ -67,9 +70,11 @@ pub fn ingest_stdin() -> Result<String, AdapterError> {
     if input.len() > MAX_INPUT_BYTES {
         return Err(protocol_error());
     }
-    let plan = parse_statusline(&input, SystemTime::now())?;
+    let fetched_at = SystemTime::now();
+    let plan = parse_statusline(&input, fetched_at)?;
     let path = cache_path().ok_or_else(|| adapter_error(AdapterErrorKind::SnapshotMissing))?;
     write_cache(&path, &plan)?;
+    let _ = record_model_usage(&input, fetched_at);
     Ok(compact_statusline(&plan))
 }
 
@@ -155,6 +160,234 @@ fn push_window(
     });
 }
 
+pub struct ClaudeModelUsageAdapter {
+    cache_path: PathBuf,
+}
+
+impl ClaudeModelUsageAdapter {
+    pub fn discover() -> Option<Self> {
+        let cache_path = model_usage_cache_path()?;
+        cache_path.is_file().then_some(Self { cache_path })
+    }
+}
+
+impl ModelUsageAdapter for ClaudeModelUsageAdapter {
+    fn source_id(&self) -> &'static str {
+        "claude-code"
+    }
+
+    fn fetch(&self) -> Result<ModelUsageSnapshot, AdapterError> {
+        read_model_usage(&self.cache_path)
+    }
+}
+
+#[derive(Deserialize)]
+struct ClaudeUsageInput {
+    session_id: Option<String>,
+    model: Option<ClaudeModel>,
+    context_window: Option<ClaudeContextWindow>,
+    cost: Option<ClaudeCost>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeModel {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct ClaudeContextWindow {
+    #[serde(default)]
+    total_input_tokens: u64,
+    #[serde(default)]
+    total_output_tokens: u64,
+}
+
+#[derive(Deserialize)]
+struct ClaudeCost {
+    #[serde(default)]
+    total_cost_usd: f64,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct ClaudeUsageCache {
+    #[serde(default)]
+    cursors: Vec<ClaudeUsageCursor>,
+    #[serde(default)]
+    models: Vec<CachedModelUsage>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ClaudeUsageCursor {
+    session_hash: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_usd: f64,
+    updated_at_millis: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CachedModelUsage {
+    model_id: String,
+    requests: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_usd: f64,
+    first_used_at_millis: u64,
+    last_used_at_millis: u64,
+}
+
+fn record_model_usage(input: &[u8], fetched_at: SystemTime) -> Result<(), AdapterError> {
+    let path =
+        model_usage_cache_path().ok_or_else(|| adapter_error(AdapterErrorKind::SnapshotMissing))?;
+    record_model_usage_at(input, fetched_at, &path)
+}
+
+fn record_model_usage_at(
+    input: &[u8],
+    fetched_at: SystemTime,
+    path: &Path,
+) -> Result<(), AdapterError> {
+    let source: ClaudeUsageInput = serde_json::from_slice(input).map_err(|_| protocol_error())?;
+    let (Some(session_id), Some(model), Some(context)) =
+        (source.session_id, source.model, source.context_window)
+    else {
+        return Ok(());
+    };
+    if model.id.is_empty() {
+        return Ok(());
+    }
+    let mut cache = read_usage_cache(path).unwrap_or_default();
+    let timestamp = system_time_millis(fetched_at)?;
+    let current_cost = source
+        .cost
+        .map(|cost| cost.total_cost_usd)
+        .filter(|cost| cost.is_finite() && *cost >= 0.0)
+        .unwrap_or(0.0);
+    let session_hash = hash_session(&session_id);
+    let (input_delta, output_delta, cost_delta) = if let Some(cursor) = cache
+        .cursors
+        .iter_mut()
+        .find(|cursor| cursor.session_hash == session_hash)
+    {
+        let deltas = (
+            context
+                .total_input_tokens
+                .saturating_sub(cursor.input_tokens),
+            context
+                .total_output_tokens
+                .saturating_sub(cursor.output_tokens),
+            (current_cost - cursor.cost_usd).max(0.0),
+        );
+        cursor.input_tokens = context.total_input_tokens;
+        cursor.output_tokens = context.total_output_tokens;
+        cursor.cost_usd = current_cost;
+        cursor.updated_at_millis = timestamp;
+        deltas
+    } else {
+        cache.cursors.push(ClaudeUsageCursor {
+            session_hash,
+            input_tokens: context.total_input_tokens,
+            output_tokens: context.total_output_tokens,
+            cost_usd: current_cost,
+            updated_at_millis: timestamp,
+        });
+        (
+            context.total_input_tokens,
+            context.total_output_tokens,
+            current_cost,
+        )
+    };
+    if input_delta > 0 || output_delta > 0 || cost_delta > 0.0 {
+        if let Some(usage) = cache
+            .models
+            .iter_mut()
+            .find(|usage| usage.model_id == model.id)
+        {
+            usage.requests = usage.requests.saturating_add(1);
+            usage.input_tokens = usage.input_tokens.saturating_add(input_delta);
+            usage.output_tokens = usage.output_tokens.saturating_add(output_delta);
+            usage.cost_usd += cost_delta;
+            usage.last_used_at_millis = timestamp;
+        } else {
+            cache.models.push(CachedModelUsage {
+                model_id: model.id,
+                requests: 1,
+                input_tokens: input_delta,
+                output_tokens: output_delta,
+                cost_usd: cost_delta,
+                first_used_at_millis: timestamp,
+                last_used_at_millis: timestamp,
+            });
+        }
+    }
+    cache
+        .cursors
+        .sort_unstable_by_key(|cursor| std::cmp::Reverse(cursor.updated_at_millis));
+    cache.cursors.truncate(64);
+    write_usage_cache(path, &cache)
+}
+
+fn hash_session(session_id: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    session_id.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn read_usage_cache(path: &Path) -> Result<ClaudeUsageCache, AdapterError> {
+    let mut encoded = Vec::new();
+    fs::File::open(path)
+        .map_err(|error| snapshot_open_error(&error))?
+        .take((MAX_INPUT_BYTES + 1) as u64)
+        .read_to_end(&mut encoded)
+        .map_err(|_| protocol_error())?;
+    if encoded.len() > MAX_INPUT_BYTES {
+        return Err(protocol_error());
+    }
+    serde_json::from_slice(&encoded).map_err(|_| protocol_error())
+}
+
+fn write_usage_cache(path: &Path, cache: &ClaudeUsageCache) -> Result<(), AdapterError> {
+    let parent = path.parent().ok_or_else(protocol_error)?;
+    fs::create_dir_all(parent).map_err(|_| protocol_error())?;
+    let encoded = serde_json::to_vec(cache).map_err(|_| protocol_error())?;
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    fs::write(&temporary, encoded).map_err(|_| protocol_error())?;
+    fs::rename(&temporary, path).map_err(|_| {
+        let _ = fs::remove_file(&temporary);
+        protocol_error()
+    })
+}
+
+fn read_model_usage(path: &Path) -> Result<ModelUsageSnapshot, AdapterError> {
+    let cache = read_usage_cache(path)?;
+    let mut models = Vec::with_capacity(cache.models.len());
+    for usage in cache.models {
+        models.push(ModelUsage {
+            agent_id: "claude-code".to_owned(),
+            agent_name: "Claude Code".to_owned(),
+            provider_id: "anthropic".to_owned(),
+            model_id: usage.model_id,
+            requests: usage.requests,
+            failed_requests: 0,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: usage.cost_usd.is_finite().then_some(usage.cost_usd),
+            first_used_at: timestamp_millis(usage.first_used_at_millis).ok(),
+            last_used_at: timestamp_millis(usage.last_used_at_millis).ok(),
+        });
+    }
+    Ok(ModelUsageSnapshot {
+        source_id: "claude-code".to_owned(),
+        fetched_at: SystemTime::now(),
+        models,
+    })
+}
+
+fn model_usage_cache_path() -> Option<PathBuf> {
+    cache_dir().map(|directory| directory.join("claude-models.json"))
+}
 #[derive(Serialize, Deserialize)]
 struct CachedPlan {
     fetched_at_millis: u64,
@@ -359,5 +592,44 @@ mod tests {
 
         assert_eq!(error.kind, AdapterErrorKind::NotAuthenticated);
         assert!(!format!("{error:?}").contains("secret"));
+    }
+    #[test]
+    fn model_usage_records_only_new_session_totals() {
+        fn status(input: u64, output: u64, cost: f64) -> Vec<u8> {
+            format!(
+                r#"{{"session_id":"session","model":{{"id":"claude-test"}},"context_window":{{"total_input_tokens":{input},"total_output_tokens":{output}}},"cost":{{"total_cost_usd":{cost}}}}}"#
+            )
+            .into_bytes()
+        }
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("limitdeck-claude-model-{unique}"));
+        let path = directory.join("usage.json");
+        record_model_usage_at(
+            &status(100, 10, 1.25),
+            UNIX_EPOCH + Duration::from_secs(1),
+            &path,
+        )
+        .unwrap();
+        record_model_usage_at(
+            &status(140, 15, 2.0),
+            UNIX_EPOCH + Duration::from_secs(2),
+            &path,
+        )
+        .unwrap();
+
+        let snapshot = read_model_usage(&path).unwrap();
+        let usage = &snapshot.models[0];
+        assert_eq!(
+            (usage.requests, usage.input_tokens, usage.output_tokens),
+            (2, 140, 15)
+        );
+        assert_eq!(usage.cost_usd, Some(2.0));
+        let encoded = fs::read_to_string(&path).unwrap();
+        assert!(!encoded.contains("session_id"));
+        let _ = fs::remove_dir_all(directory);
     }
 }

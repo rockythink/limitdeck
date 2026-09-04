@@ -4,15 +4,16 @@ use std::{
     io::{self, Read},
     process::{Command, Stdio},
     thread,
-    time::{Duration, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::Deserialize;
 use wait_timeout::ChildExt;
 
 use crate::{
-    adapter::{AdapterError, AdapterErrorKind, PlanAdapter},
-    domain::{CodingPlan, PlanIdentity, UsageStatus, UsageWindow},
+    adapter::{AdapterError, AdapterErrorKind, ModelUsageAdapter, PlanAdapter},
+    adapters::usage_common::UsageAccumulator,
+    domain::{CodingPlan, ModelUsage, ModelUsageSnapshot, PlanIdentity, UsageStatus, UsageWindow},
 };
 
 const OMP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -60,6 +61,95 @@ impl PlanAdapter for OmpCodexAdapter {
         )?;
         parse_openai_codex(&output)
     }
+}
+pub struct OmpModelUsageAdapter;
+
+impl OmpModelUsageAdapter {
+    pub fn discover() -> Option<Self> {
+        run_command("omp", &["--version"], DISCOVERY_TIMEOUT)
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl ModelUsageAdapter for OmpModelUsageAdapter {
+    fn source_id(&self) -> &'static str {
+        "omp"
+    }
+
+    fn fetch(&self) -> Result<ModelUsageSnapshot, AdapterError> {
+        let output = run_command("omp", &["stats", "--json"], OMP_TIMEOUT)?;
+        parse_model_stats(&output, SystemTime::now())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OmpStats {
+    by_model: Vec<OmpModelStats>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OmpModelStats {
+    model: String,
+    provider: String,
+    total_requests: u64,
+    failed_requests: u64,
+    total_input_tokens: u64,
+    total_output_tokens: u64,
+    total_cache_read_tokens: u64,
+    total_cache_write_tokens: u64,
+    total_cost: f64,
+    first_timestamp: u64,
+    last_timestamp: u64,
+}
+
+fn parse_model_stats(
+    input: &[u8],
+    fetched_at: SystemTime,
+) -> Result<ModelUsageSnapshot, AdapterError> {
+    let json = if input.first() == Some(&b'{') {
+        input
+    } else {
+        let start = input
+            .windows(2)
+            .position(|window| window == b"\n{")
+            .map(|index| index + 1)
+            .ok_or_else(protocol_error)?;
+        &input[start..]
+    };
+    let stats: OmpStats = serde_json::from_slice(json).map_err(|_| protocol_error())?;
+    let mut usage = UsageAccumulator::default();
+    for model in stats.by_model {
+        if model.model.is_empty() || model.provider.is_empty() {
+            continue;
+        }
+        usage.add(ModelUsage {
+            agent_id: "omp".to_owned(),
+            agent_name: "OMP".to_owned(),
+            provider_id: model.provider,
+            model_id: model.model,
+            requests: model.total_requests,
+            failed_requests: model.failed_requests,
+            input_tokens: model.total_input_tokens,
+            output_tokens: model.total_output_tokens,
+            cache_read_tokens: model.total_cache_read_tokens,
+            cache_write_tokens: model.total_cache_write_tokens,
+            cost_usd: model.total_cost.is_finite().then_some(model.total_cost),
+            first_used_at: optional_timestamp_millis(model.first_timestamp),
+            last_used_at: optional_timestamp_millis(model.last_timestamp),
+        });
+    }
+    Ok(ModelUsageSnapshot {
+        source_id: "omp".to_owned(),
+        fetched_at,
+        models: usage.into_models(),
+    })
+}
+
+fn optional_timestamp_millis(value: u64) -> Option<SystemTime> {
+    UNIX_EPOCH.checked_add(Duration::from_millis(value))
 }
 
 fn run_command(program: &str, args: &[&str], timeout: Duration) -> Result<Vec<u8>, AdapterError> {
@@ -235,6 +325,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn model_stats_preserve_model_attribution_and_token_kinds() {
+        let snapshot = parse_model_stats(
+            b"Syncing session files...\n{\"byModel\":[{\"model\":\"gpt-test\",\"provider\":\"openai\",\"totalRequests\":3,\"failedRequests\":1,\"totalInputTokens\":100,\"totalOutputTokens\":20,\"totalCacheReadTokens\":80,\"totalCacheWriteTokens\":4,\"totalCost\":1.25,\"firstTimestamp\":1000,\"lastTimestamp\":2000}]}",
+            UNIX_EPOCH,
+        )
+        .expect("OMP stats should parse");
+
+        assert_eq!(snapshot.models.len(), 1);
+        let usage = &snapshot.models[0];
+        assert_eq!(
+            (usage.agent_id.as_str(), usage.model_id.as_str()),
+            ("omp", "gpt-test")
+        );
+        assert_eq!((usage.requests, usage.failed_requests), (3, 1));
+        assert_eq!((usage.input_tokens, usage.output_tokens), (100, 20));
+        assert_eq!((usage.cache_read_tokens, usage.cache_write_tokens), (80, 4));
+        assert_eq!(usage.cost_usd, Some(1.25));
+    }
     #[cfg(unix)]
     #[test]
     fn command_timeout_is_bounded() {

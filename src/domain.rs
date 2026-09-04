@@ -64,6 +64,71 @@ pub struct CodingPlan {
     pub fetched_at: SystemTime,
     pub windows: Vec<UsageWindow>,
 }
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelUsage {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub provider_id: String,
+    pub model_id: String,
+    pub requests: u64,
+    pub failed_requests: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cost_usd: Option<f64>,
+    pub first_used_at: Option<SystemTime>,
+    pub last_used_at: Option<SystemTime>,
+}
+
+impl ModelUsage {
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        debug_assert_eq!(self.agent_id, other.agent_id);
+        debug_assert_eq!(self.provider_id, other.provider_id);
+        debug_assert_eq!(self.model_id, other.model_id);
+        self.requests = self.requests.saturating_add(other.requests);
+        self.failed_requests = self.failed_requests.saturating_add(other.failed_requests);
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(other.cache_read_tokens);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(other.cache_write_tokens);
+        self.cost_usd = match (self.cost_usd, other.cost_usd) {
+            (Some(left), Some(right)) => Some(left + right),
+            (left, right) => left.or(right),
+        };
+        self.first_used_at = earliest(self.first_used_at, other.first_used_at);
+        self.last_used_at = latest(self.last_used_at, other.last_used_at);
+    }
+}
+
+fn earliest(left: Option<SystemTime>, right: Option<SystemTime>) -> Option<SystemTime> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (left, right) => left.or(right),
+    }
+}
+
+fn latest(left: Option<SystemTime>, right: Option<SystemTime>) -> Option<SystemTime> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (left, right) => left.or(right),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelUsageSnapshot {
+    pub source_id: String,
+    pub fetched_at: SystemTime,
+    pub models: Vec<ModelUsage>,
+}
 
 impl CodingPlan {
     pub fn is_older_than(&self, max_age: Duration) -> bool {

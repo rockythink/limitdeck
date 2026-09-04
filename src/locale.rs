@@ -51,6 +51,7 @@ impl Language {
         match self {
             Self::English => UiCopy {
                 list_footer_prefix: "  ↑↓/jk Select · Enter Details · r Refresh · t ",
+                model_footer_prefix: "  ↑↓/jk Select · m Quotas · r Refresh · t ",
                 detail_footer_prefix: "  Esc Back · r Refresh · t ",
                 footer_language_separator: " · l ",
                 footer_quit: " · q Quit",
@@ -70,6 +71,7 @@ impl Language {
             },
             Self::Chinese => UiCopy {
                 list_footer_prefix: "  ↑↓/jk 选择 · Enter 详情 · r 刷新 · t ",
+                model_footer_prefix: "  ↑↓/jk 选择 · m 额度 · r 刷新 · t ",
                 detail_footer_prefix: "  Esc 返回 · r 刷新 · t ",
                 footer_language_separator: " · l ",
                 footer_quit: " · q 退出",
@@ -102,6 +104,7 @@ impl Language {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiCopy {
     pub list_footer_prefix: &'static str,
+    pub model_footer_prefix: &'static str,
     pub detail_footer_prefix: &'static str,
     pub footer_language_separator: &'static str,
     pub footer_quit: &'static str,

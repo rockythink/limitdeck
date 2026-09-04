@@ -1,8 +1,12 @@
-use crate::domain::{CodingPlan, PlanIdentity};
+use crate::domain::{CodingPlan, ModelUsageSnapshot, PlanIdentity};
 
 pub trait PlanAdapter: Send + Sync + 'static {
     fn identity(&self) -> PlanIdentity;
     fn fetch(&self) -> Result<CodingPlan, AdapterError>;
+}
+pub trait ModelUsageAdapter: Send + Sync + 'static {
+    fn source_id(&self) -> &'static str;
+    fn fetch(&self) -> Result<ModelUsageSnapshot, AdapterError>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

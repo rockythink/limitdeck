@@ -4,6 +4,7 @@ mod app;
 mod domain;
 mod history;
 mod locale;
+mod model_usage;
 mod theme;
 mod ui;
 
@@ -22,6 +23,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use history::UsageHistory;
+use model_usage::ModelUsageWorker;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
@@ -29,7 +31,7 @@ const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const HELP: &str = concat!(
     "LimitDeck ",
     env!("CARGO_PKG_VERSION"),
-    "\nA privacy-safe terminal dashboard for AI subscription limits.\n\n",
+    "\nA privacy-safe terminal dashboard for AI subscription limits and local model usage.\n\n",
     "Usage:\n",
     "  limitdeck\n",
     "  limitdeck ingest claude\n",
@@ -39,7 +41,7 @@ const HELP: &str = concat!(
     "  -h, --help       Print help\n",
     "  -V, --version    Print version\n\n",
     "Commands:\n",
-    "  ingest claude    Store a quota-only snapshot from Claude Code status-line JSON"
+    "  ingest claude    Store quota and model usage from Claude Code status-line JSON"
 );
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +110,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
         .map(|adapter| adapter.identity())
         .collect::<Vec<_>>();
     let worker = PlanWorker::spawn(adapters);
+    let model_worker = ModelUsageWorker::spawn(adapters::discover_model_usage());
     let mut app = App::new(identities);
     let mut history = UsageHistory::load_default();
     let mut next_refresh = Instant::now();
@@ -124,9 +127,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
             app.apply_event(event);
             redraw = true;
         }
+        while let Ok(Some(event)) = model_worker.try_recv() {
+            app.apply_model_usage_event(event);
+            redraw = true;
+        }
 
-        if Instant::now() >= next_refresh && !app.worker_disconnected() {
-            request_refresh(&worker, &mut app);
+        if Instant::now() >= next_refresh {
+            request_refresh(&worker, &model_worker, &mut app);
             next_refresh = Instant::now() + REFRESH_INTERVAL;
             redraw = true;
         }
@@ -184,8 +191,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
                 app.toggle_secondary_limits();
                 redraw = true;
             }
-            KeyCode::Char('r') if !app.worker_disconnected() => {
-                request_refresh(&worker, &mut app);
+            KeyCode::Tab | KeyCode::Char('m') => {
+                app.toggle_dashboard_view();
+                redraw = true;
+            }
+            KeyCode::Char('r') => {
+                request_refresh(&worker, &model_worker, &mut app);
                 next_refresh = Instant::now() + REFRESH_INTERVAL;
                 redraw = true;
             }
@@ -194,12 +205,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
     }
 }
 
-fn request_refresh(worker: &PlanWorker, app: &mut App) {
+fn request_refresh(worker: &PlanWorker, model_worker: &ModelUsageWorker, app: &mut App) {
     match worker.request_refresh() {
         Ok(true) => app.start_refresh(),
         Ok(false) => {}
         Err(_) => app.mark_worker_disconnected(),
     }
+    let _ = model_worker.request_refresh();
 }
 
 struct TerminalSession {

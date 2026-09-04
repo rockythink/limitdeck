@@ -4,7 +4,7 @@
 
 **Know what you have left—before the limit hits.**
 
-A compact, privacy-safe terminal dashboard for AI coding subscription limits.
+A compact, privacy-safe terminal dashboard for AI coding subscription limits and local per-model usage.
 
 [![Release](https://img.shields.io/github/v/release/rockythink/limitdeck?style=flat-square&label=release&color=8b5cf6)](https://github.com/rockythink/limitdeck/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/limitdeck?style=flat-square&color=10b981)](https://crates.io/crates/limitdeck)
@@ -31,11 +31,11 @@ A compact, privacy-safe terminal dashboard for AI coding subscription limits.
 <tr>
 <td width="33%" valign="top">
 <strong>Private by design</strong><br><br>
-Uses official local interfaces and stores quota-only snapshots. No copied credentials, browser cookies, subscription-page scraping, or Codex <code>auth.json</code> access.
+Uses local interfaces and stores only aggregate quota and usage metadata. No copied credentials, browser cookies, subscription-page scraping, or Codex <code>auth.json</code> access.
 </td>
 <td width="33%" valign="top">
 <strong>Signal over noise</strong><br><br>
-See remaining percentages, reset times, cached state, and local quota history without opening several apps or account pages.
+See remaining percentages, reset times, per-model tokens and cost, and local quota history without opening several apps or account pages.
 </td>
 <td width="33%" valign="top">
 <strong>Made for the terminal</strong><br><br>
@@ -88,6 +88,31 @@ quota-only snapshot ─────┼─> normalized usage windows ─> LimitDe
 optional redacted output ┘
 ```
 
+## Local model usage
+
+Press <kbd>m</kbd> or <kbd>Tab</kbd> to switch between subscription quotas and model usage. Model usage is grouped by the agent that made the request, provider, and exact model ID. These counters describe local agent activity; they are not provider account totals and cannot be converted into subscription quota percentages.
+
+The line below the tabs shows the selected model's statistics period: its earliest and latest locally observed usage. Each source reports all usage still present in its local records, so older agents can remain visible even when they were not used during the selected model's period.
+
+| Agent | Source | Coverage |
+| --- | --- | --- |
+| OMP | `omp stats --json` | Requests, tokens, cache, errors, cost, and timing |
+| Codex | Metadata-only fields from local rollout records | Requests and token kinds; no cost |
+| Claude Code | Model, context, and cost fields received by `limitdeck ingest claude` | Usage observed after status-line setup |
+| Gemini CLI | Metadata-only fields from local session records | Requests and token kinds; no cost |
+| OpenCode | Usage columns queried from its local SQLite database | Requests, tokens, cache, errors, and cost; requires `sqlite3` |
+| Pi | Metadata-only fields from `~/.pi/agent/sessions` | Requests, tokens, cache, errors, cost, and timing |
+| Aider | Aider's optional analytics JSONL log | Requests, tokens, and cost after setup |
+
+For Aider, enable its local analytics log:
+
+```yaml
+# ~/.aider.conf.yml
+analytics-log: ~/.cache/limitdeck/aider.jsonl
+```
+
+Set `AIDER_ANALYTICS_LOG` when using a different path. LimitDeck never reads Aider's LLM or chat history files.
+
 ## Claude Code setup
 
 Claude Code exposes subscription rate limits through its official status-line input. Add this to `~/.claude/settings.json`:
@@ -102,10 +127,10 @@ Claude Code exposes subscription rate limits through its official status-line in
 }
 ```
 
-The command writes a quota-only snapshot to:
+The command writes two files in `$XDG_CACHE_HOME/limitdeck`, or `~/.cache/limitdeck` when `XDG_CACHE_HOME` is unset:
 
-- `$XDG_CACHE_HOME/limitdeck/claude.json`, or
-- `~/.cache/limitdeck/claude.json` when `XDG_CACHE_HOME` is unset.
+- `claude.json` for quota windows; and
+- `claude-models.json` for aggregate per-model usage.
 
 Claude Code provides `rate_limits` only for eligible subscriptions and only after the first API response in a session.
 
@@ -151,12 +176,13 @@ Theme changes apply immediately to the list and detail views for the current ses
 | <kbd>Enter</kbd> | Open or close plan details |
 | <kbd>Esc</kbd> | Return to the list, then exit |
 | <kbd>r</kbd> | Refresh sources |
+| <kbd>m</kbd> / <kbd>Tab</kbd> | Switch between quotas and model usage |
 | <kbd>s</kbd> | Show or hide secondary limits |
 | <kbd>t</kbd> | Cycle themes |
 | <kbd>l</kbd> | Switch between English and Chinese |
 | <kbd>q</kbd> | Exit |
 
-Narrow terminals retain the vertical quota/time comparison in a compact form and keep the selected plan visible when the list exceeds the viewport.
+Narrow terminals retain the vertical quota/time comparison in a compact form. The model view follows the current selection: widths below 64 columns use a focused metric card, widths from 64 to 95 columns combine selected-model metrics with a scroll-following summary, and wider terminals show the full table. Footer labels also shorten before they would clip.
 
 ### Local quota history
 
@@ -176,8 +202,9 @@ LimitDeck retains the minimum state needed to draw the dashboard.
 | Retained locally | Deliberately ignored |
 | --- | --- |
 | Provider, plan, and quota-window identifiers | Account email and account ID |
-| Display labels and window durations | Organization and plan tier |
-| Remaining percentages and reset times | Billing data |
+| Agent, provider, model ID, and aggregate token counters | Prompts, responses, tool output, and reasoning content |
+| Remaining percentages, reset times, and usage timestamps | Organization and plan tier |
+| Locally reported model cost | Provider billing statements |
 | History timestamps and availability state | Raw credentials and provider responses |
 
 Parser inputs and subprocess output are size-bounded. Child processes have explicit timeouts and are reaped on exit.
@@ -202,13 +229,13 @@ A failing source stays visible. If a previous snapshot exists, LimitDeck marks i
 The core stays intentionally small:
 
 ```text
-official protocol / safe snapshot / optional fallback
-                         │
-                    PlanAdapter
-                         │
-           CodingPlan ─> UsageWindow
-                         │
-             App state + local history ─> TUI
+official protocols / safe snapshots / metadata-only local records
+                              │
+             PlanAdapter + ModelUsageAdapter
+                    │                  │
+       CodingPlan → UsageWindow    ModelUsage
+                    └─────────┬────────┘
+                       App state → TUI
 ```
 
 Adapters own provider-specific parsing and timeouts. The domain and UI do not depend on Codex, Claude, or OMP response formats.

@@ -4,7 +4,7 @@
 
 **在额度撞线之前，先知道还剩多少。**
 
-一个紧凑、隐私安全的 AI 编程订阅额度终端仪表盘。
+一个紧凑、隐私安全的 AI 编程订阅额度与本地模型用量终端仪表盘。
 
 [![Release](https://img.shields.io/github/v/release/rockythink/limitdeck?style=flat-square&label=release&color=8b5cf6)](https://github.com/rockythink/limitdeck/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/limitdeck?style=flat-square&color=10b981)](https://crates.io/crates/limitdeck)
@@ -31,11 +31,11 @@
 <tr>
 <td width="33%" valign="top">
 <strong>隐私是设计前提</strong><br><br>
-只使用官方本地接口，只保存额度快照。不复制凭据、不读取浏览器 Cookie、不抓取订阅网页，也不读取 Codex <code>auth.json</code>。
+只使用本地接口，只保存汇总后的额度和用量元数据。不复制凭据、不读取浏览器 Cookie、不抓取订阅网页，也不读取 Codex <code>auth.json</code>。
 </td>
 <td width="33%" valign="top">
 <strong>只留下有效信号</strong><br><br>
-在一个界面里查看剩余百分比、重置时间、缓存状态和本地额度历史，不必来回打开多个应用或账户页面。
+在一个界面里查看剩余百分比、重置时间、各模型 Token 与成本和本地额度历史，不必来回打开多个应用或账户页面。
 </td>
 <td width="33%" valign="top">
 <strong>为终端而生</strong><br><br>
@@ -88,6 +88,31 @@ Codex App Server 与 OMP 备用来源同时可用时，LimitDeck 优先使用 Ap
 可选脱敏输出 ─┘
 ```
 
+## 本地模型用量
+
+按 <kbd>m</kbd> 或 <kbd>Tab</kbd> 可在订阅额度与模型用量之间切换。模型用量按实际发起请求的 Agent、提供方和完整模型 ID 分组。这些计数代表本机 Agent 活动，不是提供方账户全量，也不能换算成订阅额度百分比。
+
+页签下方会显示当前选中模型的统计区间，即本机数据中最早和最近一次观测到该模型用量的时间。每个来源都会统计其本地记录中仍然保留的全部用量，因此即使某个 Agent 在当前选中模型的统计期间内没有使用，较旧记录仍可能显示。
+
+| Agent | 数据来源 | 覆盖范围 |
+| --- | --- | --- |
+| OMP | `omp stats --json` | 请求、Token、缓存、错误、成本和性能 |
+| Codex | 本地 rollout 记录中的纯元数据字段 | 请求和各类 Token；不含成本 |
+| Claude Code | `limitdeck ingest claude` 收到的模型、上下文和成本字段 | 配置 status-line 后观察到的用量 |
+| Gemini CLI | 本地会话记录中的纯元数据字段 | 请求和各类 Token；不含成本 |
+| OpenCode | 从本地 SQLite 数据库查询用量列 | 请求、Token、缓存、错误和成本；需要 `sqlite3` |
+| Pi | `~/.pi/agent/sessions` 中的纯元数据字段 | 请求、Token、缓存、错误、成本和时间 |
+| Aider | Aider 可选的 analytics JSONL 日志 | 配置后记录请求、Token 和成本 |
+
+Aider 需要启用本地 analytics 日志：
+
+```yaml
+# ~/.aider.conf.yml
+analytics-log: ~/.cache/limitdeck/aider.jsonl
+```
+
+如使用其他路径，请设置 `AIDER_ANALYTICS_LOG`。LimitDeck 不读取 Aider 的 LLM 历史或聊天历史。
+
 ## Claude Code 配置
 
 Claude Code 通过官方 status-line 输入提供订阅限额。将以下配置加入 `~/.claude/settings.json`：
@@ -102,10 +127,10 @@ Claude Code 通过官方 status-line 输入提供订阅限额。将以下配置�
 }
 ```
 
-该命令只写入额度快照，位置为：
+该命令会在 `$XDG_CACHE_HOME/limitdeck` 中写入两个文件；未设置 `XDG_CACHE_HOME` 时使用 `~/.cache/limitdeck`：
 
-- `$XDG_CACHE_HOME/limitdeck/claude.json`；或
-- 未设置 `XDG_CACHE_HOME` 时的 `~/.cache/limitdeck/claude.json`。
+- `claude.json` 保存额度窗口；
+- `claude-models.json` 保存按模型汇总的用量。
 
 只有符合条件的订阅才会收到 Claude Code 的 `rate_limits`，而且当前会话完成第一次 API 响应后才会出现。
 
@@ -151,12 +176,13 @@ GPT-5.3-Codex-Spark 窗口作为次要限额，默认隐藏。有可用窗口时
 | <kbd>Enter</kbd> | 打开或关闭订阅详情 |
 | <kbd>Esc</kbd> | 返回列表，再按一次退出 |
 | <kbd>r</kbd> | 刷新数据来源 |
+| <kbd>m</kbd> / <kbd>Tab</kbd> | 切换额度与模型用量 |
 | <kbd>s</kbd> | 显示或隐藏次要限额 |
 | <kbd>t</kbd> | 切换主题 |
 | <kbd>l</kbd> | 切换中文与英文 |
 | <kbd>q</kbd> | 退出 |
 
-窄终端仍保留紧凑的上下配额/时间对比；列表超过视口高度时，当前选择项始终保持可见。
+窄终端仍保留紧凑的上下配额/时间对比。模型视图会跟随当前选择：宽度低于 64 列时显示聚焦指标卡片，64–95 列时将所选模型指标与自动滚动的摘要列表结合，更宽时显示完整表格。底部快捷键说明也会在截断前自动缩短。
 
 ### 本地额度历史
 
@@ -176,8 +202,9 @@ LimitDeck 只保留绘制仪表盘所必需的最小状态。
 | 本地保留 | 明确忽略 |
 | --- | --- |
 | 提供方、订阅和额度窗口标识 | 账户邮箱与账户 ID |
-| 展示标签与窗口时长 | 组织与订阅等级 |
-| 剩余百分比与重置时间 | 账单数据 |
+| Agent、提供方、模型 ID 和汇总 Token | 提示词、回复、工具输出和推理内容 |
+| 剩余百分比、重置时间和用量时间戳 | 组织与订阅等级 |
+| Agent 本地报告的模型成本 | 提供方账单明细 |
 | 历史时间戳与可用状态 | 原始凭据与提供方响应 |
 
 解析器输入与子进程输出都有大小上限。子进程有明确超时，并会在退出时回收。
@@ -202,13 +229,13 @@ LimitDeck 只保留绘制仪表盘所必需的最小状态。
 核心刻意保持简单：
 
 ```text
-官方协议 / 安全快照 / 可选备用来源
-                    │
-               PlanAdapter
-                    │
-      CodingPlan ─> UsageWindow
-                    │
-        应用状态 + 本地历史 ─> TUI
+官方协议 / 安全快照 / 只取元数据的本地记录
+                         │
+          PlanAdapter + ModelUsageAdapter
+                  │                  │
+     CodingPlan → UsageWindow    ModelUsage
+                  └─────────┬────────┘
+                      应用状态 → TUI
 ```
 
 适配器负责各提供方的解析和超时策略；领域层和 UI 不依赖 Codex、Claude 或 OMP 的响应格式。

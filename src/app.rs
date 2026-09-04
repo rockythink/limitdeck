@@ -10,8 +10,9 @@ use std::{
 
 use crate::{
     adapter::{AdapterError, AdapterErrorKind, PlanAdapter},
-    domain::{CodingPlan, PlanIdentity},
+    domain::{CodingPlan, ModelUsage, PlanIdentity},
     locale::Language,
+    model_usage::ModelUsageEvent,
     theme::Theme,
 };
 
@@ -88,14 +89,22 @@ impl PlanState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DashboardView {
+    #[default]
+    Quotas,
+    Models,
+}
 pub struct App {
     plans: Vec<PlanState>,
     selected: usize,
+    model_usage: Vec<ModelUsage>,
+    selected_model: usize,
+    view: DashboardView,
     detail_open: bool,
     theme: Theme,
     language: Language,
     secondary_limits_visible: bool,
-    worker_disconnected: bool,
 }
 
 impl App {
@@ -109,16 +118,37 @@ impl App {
         Self {
             plans,
             selected: 0,
+            model_usage: Vec::new(),
+            selected_model: 0,
+            view: DashboardView::default(),
             detail_open: false,
             theme: Theme::default(),
             language: Language::detect(),
             secondary_limits_visible: false,
-            worker_disconnected: false,
         }
     }
 
     pub fn plans(&self) -> &[PlanState] {
         &self.plans
+    }
+    pub fn dashboard_view(&self) -> DashboardView {
+        self.view
+    }
+
+    pub fn toggle_dashboard_view(&mut self) {
+        self.view = match self.view {
+            DashboardView::Quotas => DashboardView::Models,
+            DashboardView::Models => DashboardView::Quotas,
+        };
+        self.detail_open = false;
+    }
+
+    pub fn model_usage(&self) -> &[ModelUsage] {
+        &self.model_usage
+    }
+
+    pub fn selected_model_index(&self) -> usize {
+        self.selected_model
     }
 
     pub fn selected_index(&self) -> usize {
@@ -162,19 +192,32 @@ impl App {
         self.language = language;
     }
     pub fn select_next(&mut self) {
-        if !self.plans.is_empty() {
-            self.selected = (self.selected + 1) % self.plans.len();
+        match self.view {
+            DashboardView::Quotas if !self.plans.is_empty() => {
+                self.selected = (self.selected + 1) % self.plans.len();
+            }
+            DashboardView::Models if !self.model_usage.is_empty() => {
+                self.selected_model = (self.selected_model + 1) % self.model_usage.len();
+            }
+            _ => {}
         }
     }
 
     pub fn select_previous(&mut self) {
-        if !self.plans.is_empty() {
-            self.selected = (self.selected + self.plans.len() - 1) % self.plans.len();
+        match self.view {
+            DashboardView::Quotas if !self.plans.is_empty() => {
+                self.selected = (self.selected + self.plans.len() - 1) % self.plans.len();
+            }
+            DashboardView::Models if !self.model_usage.is_empty() => {
+                self.selected_model =
+                    (self.selected_model + self.model_usage.len() - 1) % self.model_usage.len();
+            }
+            _ => {}
         }
     }
 
     pub fn toggle_detail(&mut self) {
-        if !self.plans.is_empty() {
+        if self.view == DashboardView::Quotas && !self.plans.is_empty() {
             self.detail_open = !self.detail_open;
         }
     }
@@ -201,9 +244,43 @@ impl App {
             plan.apply(result);
         }
     }
+    pub fn apply_model_usage_event(&mut self, event: ModelUsageEvent) {
+        let Ok(snapshot) = event.result else {
+            return;
+        };
+        if snapshot.source_id != event.source_id {
+            return;
+        }
+        self.model_usage
+            .retain(|usage| usage.agent_id != event.source_id);
+        for usage in snapshot
+            .models
+            .into_iter()
+            .filter(|usage| usage.agent_id == event.source_id)
+        {
+            if let Some(existing) = self.model_usage.iter_mut().find(|existing| {
+                existing.agent_id == usage.agent_id
+                    && existing.provider_id == usage.provider_id
+                    && existing.model_id == usage.model_id
+            }) {
+                existing.merge(&usage);
+            } else {
+                self.model_usage.push(usage);
+            }
+        }
+        self.model_usage.sort_by(|left, right| {
+            right
+                .total_tokens()
+                .cmp(&left.total_tokens())
+                .then_with(|| left.agent_name.cmp(&right.agent_name))
+                .then_with(|| left.model_id.cmp(&right.model_id))
+        });
+        self.selected_model = self
+            .selected_model
+            .min(self.model_usage.len().saturating_sub(1));
+    }
 
     pub fn mark_worker_disconnected(&mut self) {
-        self.worker_disconnected = true;
         for plan in &mut self.plans {
             if matches!(plan.phase, PlanPhase::Loading | PlanPhase::Refreshing) {
                 plan.apply(Err(AdapterError::new(
@@ -212,10 +289,6 @@ impl App {
                 )));
             }
         }
-    }
-
-    pub fn worker_disconnected(&self) -> bool {
-        self.worker_disconnected
     }
 }
 
@@ -505,5 +578,51 @@ mod tests {
 
         assert!(first.is_ok() && second.is_ok());
         assert!(started.elapsed() < Duration::from_millis(150));
+    }
+    #[test]
+    fn model_snapshots_replace_each_source_and_keep_agent_attribution() {
+        fn usage(agent: &str, model: &str, tokens: u64) -> ModelUsage {
+            ModelUsage {
+                agent_id: agent.to_owned(),
+                agent_name: agent.to_owned(),
+                provider_id: "openai".to_owned(),
+                model_id: model.to_owned(),
+                requests: 1,
+                failed_requests: 0,
+                input_tokens: tokens,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                cost_usd: None,
+                first_used_at: None,
+                last_used_at: None,
+            }
+        }
+
+        let mut app = App::new(std::iter::empty::<PlanIdentity>());
+        app.apply_model_usage_event(ModelUsageEvent {
+            source_id: "omp",
+            result: Ok(crate::domain::ModelUsageSnapshot {
+                source_id: "omp".to_owned(),
+                fetched_at: SystemTime::now(),
+                models: vec![usage("omp", "gpt", 10), usage("omp", "gpt", 20)],
+            }),
+        });
+        assert_eq!(app.model_usage().len(), 1);
+        assert_eq!(app.model_usage()[0].input_tokens, 30);
+
+        app.apply_model_usage_event(ModelUsageEvent {
+            source_id: "omp",
+            result: Ok(crate::domain::ModelUsageSnapshot {
+                source_id: "omp".to_owned(),
+                fetched_at: SystemTime::now(),
+                models: vec![usage("omp", "gpt", 7)],
+            }),
+        });
+        assert_eq!(app.model_usage()[0].input_tokens, 7);
+        app.toggle_dashboard_view();
+        assert_eq!(app.dashboard_view(), DashboardView::Models);
+        app.toggle_detail();
+        assert!(!app.is_detail_open());
     }
 }
