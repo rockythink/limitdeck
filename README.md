@@ -20,8 +20,9 @@ A compact, privacy-safe terminal dashboard for AI coding subscription limits and
 </p>
 
 <p align="center">
-  <img src="assets/limitdeck-en.gif" alt="LimitDeck showing Codex and Claude subscription limits in English" width="800">
+  <img src="assets/limitdeck-en.gif" alt="LimitDeck cycling through quota details, model usage filters, and contextual help in English" width="900">
 </p>
+<p align="center"><sub>Quota detail → overview → 30-day models → all history → contextual help</sub></p>
 
 ---
 
@@ -40,6 +41,31 @@ See remaining percentages, reset times, per-model tokens and cost, and local quo
 <td width="33%" valign="top">
 <strong>Made for the terminal</strong><br><br>
 Fast keyboard control, compact narrow layouts, three runtime themes, and prebuilt binaries for macOS and Linux.
+</td>
+</tr>
+</table>
+
+## Screenshots
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<img src="assets/screenshots/detail-en.png" alt="Detailed Codex quota windows with remaining quota, time, and local history" width="100%"><br>
+<sub><strong>Quota detail.</strong> Remaining quota, time to reset, and local history on the same scale.</sub>
+</td>
+<td width="50%" valign="top">
+<img src="assets/screenshots/quotas-en.png" alt="LimitDeck subscription quota overview" width="100%"><br>
+<sub><strong>Quota overview.</strong> Every active reset window in one compact view.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<img src="assets/screenshots/models-30d-en.png" alt="LimitDeck model usage filtered to the last 30 days" width="100%"><br>
+<sub><strong>Model usage.</strong> Local activity grouped by agent and exact model ID.</sub>
+</td>
+<td width="50%" valign="top">
+<img src="assets/screenshots/help-en.png" alt="LimitDeck contextual keyboard help" width="100%"><br>
+<sub><strong>Contextual help.</strong> Only the controls available in the current view.</sub>
 </td>
 </tr>
 </table>

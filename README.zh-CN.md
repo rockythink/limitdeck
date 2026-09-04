@@ -20,8 +20,9 @@
 </p>
 
 <p align="center">
-  <img src="assets/limitdeck-zh-CN.gif" alt="LimitDeck 以中文展示 Codex 与 Claude 订阅额度" width="800">
+  <img src="assets/limitdeck-zh-CN.gif" alt="LimitDeck 以中文轮播额度详情、模型用量筛选与上下文帮助" width="900">
 </p>
+<p align="center"><sub>额度详情 → 通览 → 最近 30 天模型 → 全部历史 → 上下文帮助</sub></p>
 
 ---
 
@@ -40,6 +41,31 @@
 <td width="33%" valign="top">
 <strong>为终端而生</strong><br><br>
 全键盘操作、窄终端紧凑布局、三套运行时主题，并提供 macOS 与 Linux 预编译包。
+</td>
+</tr>
+</table>
+
+## 界面截图
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<img src="assets/screenshots/detail-zh-CN.png" alt="Codex 额度详情，展示剩余额度、重置时间和本地历史" width="100%"><br>
+<sub><strong>额度详情。</strong> 用同一尺度对照剩余额度、重置时间与本地历史。</sub>
+</td>
+<td width="50%" valign="top">
+<img src="assets/screenshots/quotas-zh-CN.png" alt="LimitDeck 订阅额度通览" width="100%"><br>
+<sub><strong>额度通览。</strong> 在一个紧凑界面里查看所有有效重置窗口。</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<img src="assets/screenshots/models-30d-zh-CN.png" alt="LimitDeck 最近 30 天模型用量" width="100%"><br>
+<sub><strong>模型用量。</strong> 按 Agent 与完整模型 ID 汇总本机活动。</sub>
+</td>
+<td width="50%" valign="top">
+<img src="assets/screenshots/help-zh-CN.png" alt="LimitDeck 上下文快捷键帮助" width="100%"><br>
+<sub><strong>上下文帮助。</strong> 只展示当前界面可用的操作。</sub>
 </td>
 </tr>
 </table>
