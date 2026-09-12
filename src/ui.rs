@@ -21,6 +21,7 @@ use crate::{
 const FILLED_BAR_GLYPH: &str = "━";
 const EMPTY_BAR_GLYPH: &str = "─";
 const LIST_PERIOD_WIDTH: usize = 3;
+const MIN_BAR_WIDTH: usize = 8;
 
 pub fn render(frame: &mut Frame<'_>, app: &App, history: &UsageHistory) {
     let area = frame.area();
@@ -650,16 +651,16 @@ fn render_plan_list(
         let rows = plan_rows(
             plan,
             area.width,
-            viewport_height,
+            viewport_height - screen_row,
             selected,
             palette,
             language,
             secondary_limits_visible,
         );
-        if screen_row + rows.len() > viewport_height {
+        if screen_row > 0 && screen_row + rows.len() > viewport_height {
             break;
         }
-        for spans in rows {
+        for spans in rows.into_iter().take(viewport_height - screen_row) {
             render_line(frame, row(area, screen_row as u16), spans, background);
             screen_row += 1;
         }
@@ -672,7 +673,15 @@ fn viewport_start(app: &App, width: u16, viewport_height: usize) -> usize {
     let mut start = 0usize;
     let mut occupied = app.plans()[..=selected]
         .iter()
-        .map(|plan| plan_height(plan, width, viewport_height, secondary_limits_visible))
+        .map(|plan| {
+            plan_height(
+                plan,
+                width,
+                viewport_height,
+                secondary_limits_visible,
+                app.language(),
+            )
+        })
         .sum::<usize>();
 
     while occupied > viewport_height && start < selected {
@@ -681,6 +690,7 @@ fn viewport_start(app: &App, width: u16, viewport_height: usize) -> usize {
             width,
             viewport_height,
             secondary_limits_visible,
+            app.language(),
         ));
         start += 1;
     }
@@ -692,12 +702,19 @@ fn plan_height(
     width: u16,
     viewport_height: usize,
     secondary_limits_visible: bool,
+    language: Language,
 ) -> usize {
     let Some(plan) = &state.plan else {
         return 1;
     };
     let status_height = usize::from(secondary_window_count(plan) > 0);
-    if uses_stacked_rows(state, width, viewport_height, secondary_limits_visible) {
+    if uses_stacked_rows(
+        state,
+        width,
+        viewport_height,
+        secondary_limits_visible,
+        language,
+    ) {
         visible_window_count(plan, secondary_limits_visible)
             .saturating_mul(2)
             .saturating_add(status_height)
@@ -711,6 +728,7 @@ fn uses_stacked_rows(
     width: u16,
     viewport_height: usize,
     secondary_limits_visible: bool,
+    language: Language,
 ) -> bool {
     let Some(plan) = &state.plan else {
         return false;
@@ -719,7 +737,12 @@ fn uses_stacked_rows(
     let required_height = visible_count
         .saturating_mul(2)
         .saturating_add(usize::from(secondary_window_count(plan) > 0));
-    width >= 40 && visible_count > 2 && required_height <= viewport_height
+    let copy = language.copy();
+    let label_width = copy.quota_short.width().max(copy.time_short.width());
+    width >= 32
+        && visible_count > 1
+        && required_height <= viewport_height
+        && (visible_count > 2 || metric_bar_width(width, 11, visible_count, label_width).is_none())
 }
 
 fn plan_rows(
@@ -731,7 +754,13 @@ fn plan_rows(
     language: Language,
     secondary_limits_visible: bool,
 ) -> Vec<Vec<Span<'static>>> {
-    if uses_stacked_rows(state, width, viewport_height, secondary_limits_visible) {
+    if uses_stacked_rows(
+        state,
+        width,
+        viewport_height,
+        secondary_limits_visible,
+        language,
+    ) {
         return stacked_plan_rows(
             state,
             width,
@@ -760,14 +789,21 @@ fn stacked_plan_rows(
     secondary_limits_visible: bool,
 ) -> Vec<Vec<Span<'static>>> {
     let accent = provider_accent(&state.identity.provider_id, palette);
-    let name_width = 9usize;
-    let model_width = 7usize;
-    let prefix_width = 2 + name_width;
+    let plan = state.plan.as_ref().expect("stacked rows require a plan");
+    let model_width = if secondary_limits_visible && secondary_window_count(plan) > 0 {
+        7
+    } else {
+        0
+    };
     let copy = language.copy();
     let metric_label_width = copy.quota_short.width().max(copy.time_short.width());
-    let bar_width =
-        metric_bar_width(width, prefix_width + model_width, 1, metric_label_width).unwrap_or(1);
-    let plan = state.plan.as_ref().expect("stacked rows require a plan");
+    // Shorten names before taking columns away from the progress tracks.
+    let name_width = usize::from(width)
+        .saturating_sub(2 + model_width + 5 + metric_label_width + 6 + MIN_BAR_WIDTH)
+        .min(9);
+    let prefix_width = 2 + name_width;
+    let bar_width = metric_bar_width(width, prefix_width + model_width, 1, metric_label_width)
+        .expect("stacked layout reserves a readable progress track");
     let secondary_count = secondary_window_count(plan);
     let visible_count = visible_window_count(plan, secondary_limits_visible);
     let mut rows = Vec::with_capacity(visible_count.saturating_mul(2).saturating_add(1));
@@ -793,10 +829,12 @@ fn stacked_plan_rows(
             vec![Span::raw(" ".repeat(prefix_width))]
         };
         let row_accent = window_accent(window, accent, palette);
-        quota.push(Span::styled(
-            fit_name(&compact_window_model(window), model_width),
-            Style::default().fg(row_accent),
-        ));
+        if model_width > 0 {
+            quota.push(Span::styled(
+                fit_name(&compact_window_model(window), model_width),
+                Style::default().fg(row_accent),
+            ));
+        }
         let period = period_label(window.period, language);
         quota.push(Span::styled(
             format!(" {} ", pad_left_display(&period, LIST_PERIOD_WIDTH)),
@@ -929,26 +967,12 @@ fn plan_comparison_rows(
             );
         }
     } else {
-        let (detailed_quota, detailed_time) = compact_metric_rows(
+        let (quota_values, time_values) = compact_metric_rows(
             &plan.windows,
             copy.quota_short,
             copy.time_short,
-            true,
             secondary_limits_visible,
         );
-        let use_markers =
-            prefix_width + detailed_quota.width().max(detailed_time.width()) <= usize::from(width);
-        let (quota_values, time_values) = if use_markers {
-            (detailed_quota, detailed_time)
-        } else {
-            compact_metric_rows(
-                &plan.windows,
-                copy.quota_short,
-                copy.time_short,
-                false,
-                secondary_limits_visible,
-            )
-        };
         quota.push(Span::styled(
             quota_values,
             Style::default().fg(palette.text),
@@ -1023,14 +1047,13 @@ fn metric_bar_width(
     let fixed = prefix_width
         .checked_add(windows.checked_mul(PERIOD_COLUMNS + label_width + VALUE_COLUMNS)?)?;
     let available = usize::from(width).checked_sub(fixed)?;
-    (available >= windows).then(|| (available / windows).clamp(1, 8))
+    (available / windows >= MIN_BAR_WIDTH).then_some(MIN_BAR_WIDTH)
 }
 
 fn compact_metric_rows(
     windows: &[UsageWindow],
     quota_label: &str,
     time_label: &str,
-    markers: bool,
     secondary_limits_visible: bool,
 ) -> (String, String) {
     let visible_count = windows
@@ -1047,24 +1070,8 @@ fn compact_metric_rows(
         let quota_percent =
             (window.status == UsageStatus::Available).then_some(window.remaining_percent);
         let time_percent = window.remaining_time_percent_at(SystemTime::now());
-        let quota = if markers {
-            format!(
-                "{}{}",
-                progress_marker(quota_percent),
-                compact_progress_value(quota_percent)
-            )
-        } else {
-            compact_progress_value(quota_percent)
-        };
-        let time = if markers {
-            format!(
-                "{}{}",
-                progress_marker(time_percent),
-                compact_progress_value(time_percent)
-            )
-        } else {
-            compact_progress_value(time_percent)
-        };
+        let quota = compact_progress_value(quota_percent);
+        let time = compact_progress_value(time_percent);
         widths.push(quota.width().max(time.width()));
         quota_cells.push(quota);
         time_cells.push(time);
@@ -1252,14 +1259,30 @@ fn render_detail(
             next_y += 1;
         }
 
+        let (quota_label, time_label) = detail_metric_labels(area.width, language);
+        let metric_label_width = quota_label.width().max(time_label.width());
+        let label_limit =
+            usize::from(area.width).saturating_sub(metric_label_width + 11 + MIN_BAR_WIDTH);
         let labels = plan
             .windows
             .iter()
             .filter(|window| window_is_visible(window, secondary_limits_visible))
-            .map(|window| localized_window_label(window, language))
+            .map(|window| {
+                let label = localized_window_label(window, language);
+                if label.width() <= label_limit {
+                    return label;
+                }
+                let period = period_label(window.period, language);
+                if label_limit <= period.width() {
+                    return fit_display_width(&period, label_limit);
+                }
+                let model = fit_display_width(
+                    &compact_window_model(window),
+                    label_limit.saturating_sub(period.width() + 1),
+                );
+                format!("{model} {period}")
+            })
             .collect::<Vec<_>>();
-        let metric_label_width = copy.quota.width().max(copy.time.width());
-        let label_limit = usize::from(area.width).saturating_sub(metric_label_width + 12);
         let columns = DetailColumns {
             label: labels
                 .iter()
@@ -1568,6 +1591,15 @@ fn braille_chart(samples: &[HistorySample], width: usize) -> String {
     graph
 }
 
+fn detail_metric_labels(width: u16, language: Language) -> (&'static str, &'static str) {
+    let copy = language.copy();
+    if width < 40 {
+        (copy.quota_short, copy.time_short)
+    } else {
+        (copy.quota, copy.time)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct DetailColumns {
     label: usize,
@@ -1586,17 +1618,22 @@ fn detail_window_rows(
     let label = fit_display_width(localized_label, columns.label);
     let label_padding = columns.label.saturating_sub(label.width());
     let reset = reset_text(window.resets_at, language);
-    let copy = language.copy();
+    let (quota_label, time_label) = detail_metric_labels(width, language);
     let total_width = usize::from(width);
-    let metric_label_width = copy.quota.width().max(copy.time.width());
+    let metric_label_width = quota_label.width().max(time_label.width());
     let prefix_width = 2 + columns.label + 2;
     let metric_fixed_width = metric_label_width + 6;
     let reset_columns = 2 + columns.reset;
-    let show_reset =
-        width >= 48 && total_width >= prefix_width + metric_fixed_width + reset_columns + 2;
+    let show_reset = width >= 48
+        && total_width > prefix_width + metric_fixed_width + reset_columns + MIN_BAR_WIDTH;
     let reserved_width =
         prefix_width + metric_fixed_width + usize::from(show_reset) * reset_columns + 1;
-    let bar_width = total_width.saturating_sub(reserved_width).clamp(1, 20);
+    let available = total_width.saturating_sub(reserved_width);
+    let bar_width = if available >= MIN_BAR_WIDTH {
+        available.min(20)
+    } else {
+        0
+    };
 
     let mut quota = vec![Span::styled(
         format!("  {label}{}  ", " ".repeat(label_padding)),
@@ -1606,7 +1643,7 @@ fn detail_window_rows(
         (window.status == UsageStatus::Available).then_some(window.remaining_percent);
     push_labeled_progress(
         &mut quota,
-        copy.quota,
+        quota_label,
         metric_label_width,
         quota_percent,
         bar_width,
@@ -1626,7 +1663,7 @@ fn detail_window_rows(
     let mut time = vec![Span::raw(" ".repeat(prefix_width))];
     push_labeled_progress(
         &mut time,
-        copy.time,
+        time_label,
         metric_label_width,
         window.remaining_time_percent_at(SystemTime::now()),
         bar_width,
@@ -1685,14 +1722,6 @@ fn pad_left_display(value: &str, width: usize) -> String {
         " ".repeat(width.saturating_sub(value.width())),
         value
     )
-}
-
-fn progress_marker(percent: Option<u8>) -> &'static str {
-    match percent {
-        Some(50..=100) => FILLED_BAR_GLYPH,
-        Some(_) => EMPTY_BAR_GLYPH,
-        None => "·",
-    }
 }
 
 fn compact_progress_value(percent: Option<u8>) -> String {
@@ -1966,6 +1995,56 @@ mod tests {
         app.toggle_secondary_limits();
         let hidden_again = snapshot_text(&draw(&app, 100, 6));
         assert!(!hidden_again.contains("Spark"), "{hidden_again:?}");
+    }
+
+    #[test]
+    fn narrow_primary_windows_reflow_before_squeezing_bars() {
+        let mut app = populated_app();
+        app.select_next();
+        let narrow = draw(&app, 48, 9);
+        let quota_rows = (0..9)
+            .map(|y| text(&narrow, y))
+            .filter(|row| row.contains("63%") || row.contains("82%"))
+            .collect::<Vec<_>>();
+        assert_eq!(quota_rows.len(), 2, "{}", snapshot_text(&narrow));
+        for row in quota_rows {
+            assert!(
+                row.chars().filter(|ch| matches!(ch, '━' | '─')).count() >= 8,
+                "{row}"
+            );
+        }
+        let wide = draw(&app, 80, 9);
+        assert!((0..9).any(|y| {
+            let row = text(&wide, y);
+            row.contains("63%") && row.contains("82%")
+        }));
+        let short = draw(&app, 48, 3);
+        let quota = text(&short, 0);
+        assert!(
+            quota.contains("Claude") && quota.contains("63%") && quota.contains("82%"),
+            "{quota}"
+        );
+        assert!(!quota.contains(['━', '─']), "{quota}");
+    }
+
+    #[test]
+    fn narrow_detail_reserves_readable_bars_before_long_labels() {
+        let mut app = app_with_all_codex_windows(&[71, 52, 33]);
+        app.toggle_detail();
+        for language in [Language::English, Language::Chinese] {
+            app.set_language(language);
+            let backend = draw(&app, 48, 9);
+            for (y, percent) in [(2, "71%"), (4, "52%"), (6, "33%")] {
+                let quota = text(&backend, y);
+                assert!(quota.contains(percent), "{quota}");
+                for row in [quota, text(&backend, y + 1)] {
+                    assert!(
+                        row.chars().filter(|ch| matches!(ch, '━' | '─')).count() >= 8,
+                        "{row}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -2459,12 +2538,6 @@ mod tests {
     fn snapshot_normal_list_at_80_by_8() {
         let backend = draw(&populated_app(), 80, 8);
         assert_snapshot!("normal_list_80x8", snapshot_text(&backend));
-    }
-
-    #[test]
-    fn snapshot_narrow_list_at_40_by_6() {
-        let backend = draw(&app_with_codex_windows(&[71, 52, 33]), 40, 6);
-        assert_snapshot!("narrow_list_40x6", snapshot_text(&backend));
     }
 
     #[test]

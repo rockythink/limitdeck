@@ -212,7 +212,9 @@ Theme changes apply immediately and are restored the next time LimitDeck starts.
 | <kbd>?</kbd> | Open or close the contextual keyboard help |
 | <kbd>q</kbd> | Exit |
 
-Narrow terminals retain the vertical quota/time comparison in a compact form. The model view follows the current selection: widths below 64 columns use a focused metric card, widths from 64 to 95 columns combine selected-model metrics with a scroll-following summary, and wider terminals show the full table. Footer labels also shorten before they would clip.
+Quota bars keep a readable minimum of 8 columns. When windows no longer fit side by side, the list stacks each quota/time pair vertically if there is room (at least 32 columns); names shorten before bars do. With insufficient width or height, the list falls back to aligned percentages rather than tiny bars. Details shorten long window labels while preserving the period, abbreviate metric labels below 40 columns, and omit reset text before sacrificing bar width.
+
+The model view follows the current selection: widths below 64 columns use a focused metric card, widths from 64 to 95 columns combine selected-model metrics with a scroll-following summary, and wider terminals show the full table. Footer labels also shorten before they would clip.
 
 Theme, language, model time range, and secondary-limit visibility are stored at `$XDG_CONFIG_HOME/limitdeck/config.json`, or `~/.config/limitdeck/config.json` when `XDG_CONFIG_HOME` is unset. Invalid or unsupported preference files are ignored and replaced by safe defaults on the next preference change.
 
