@@ -1,11 +1,13 @@
 mod adapter;
 mod adapters;
 mod app;
+mod child_process;
 mod domain;
 mod history;
 mod locale;
 mod model_usage;
 mod preferences;
+mod snapshot;
 mod theme;
 mod ui;
 
@@ -37,19 +39,22 @@ const HELP: &str = concat!(
     "Usage:\n",
     "  limitdeck\n",
     "  limitdeck ingest claude\n",
+    "  limitdeck snapshot --json\n",
     "  limitdeck --help\n",
     "  limitdeck --version\n\n",
     "Options:\n",
     "  -h, --help       Print help\n",
     "  -V, --version    Print version\n\n",
     "Commands:\n",
-    "  ingest claude    Store quota and model usage from Claude Code status-line JSON"
+    "  ingest claude    Store quota and model usage from Claude Code status-line JSON\n",
+    "  snapshot --json  Collect a privacy-safe quota snapshot once, without a TUI"
 );
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Command {
     Dashboard,
     IngestClaude,
+    Snapshot,
     Help,
     Version,
 }
@@ -74,6 +79,13 @@ fn main() -> ExitCode {
             println!("{line}");
             ExitCode::SUCCESS
         }
+        Ok(Command::Snapshot) => match snapshot::write_json(stdout().lock()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => {
+                eprintln!("Could not write quota snapshot");
+                ExitCode::FAILURE
+            }
+        },
         Ok(Command::Help) => {
             println!("{HELP}");
             ExitCode::SUCCESS
@@ -95,6 +107,7 @@ fn parse_command(arguments: &[String]) -> Result<Command, ()> {
         [argument] if argument == "-h" || argument == "--help" => Ok(Command::Help),
         [argument] if argument == "-V" || argument == "--version" => Ok(Command::Version),
         [ingest, claude] if ingest == "ingest" && claude == "claude" => Ok(Command::IngestClaude),
+        [snapshot, json] if snapshot == "snapshot" && json == "--json" => Ok(Command::Snapshot),
         _ => Err(()),
     }
 }
@@ -106,18 +119,21 @@ fn run() -> io::Result<()> {
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
-    let adapters = adapters::discover();
-    let identities = adapters
-        .iter()
-        .map(|adapter| adapter.identity())
-        .collect::<Vec<_>>();
-    let worker = PlanWorker::spawn(adapters);
+    // Discovery runs in the worker so the dashboard appears immediately
+    // and plans join monitoring as they are found.
+    let worker = PlanWorker::spawn(Vec::new());
     let model_worker = ModelUsageWorker::spawn(adapters::discover_model_usage());
-    let mut app = App::new(identities);
+    let mut app = App::new(Vec::new());
+    if worker
+        .request_discover()
+        .map_or(true, |requested| !requested)
+    {
+        app.mark_worker_disconnected();
+    }
     let preferences = Preferences::load_default();
     preferences.apply(&mut app);
     let mut history = UsageHistory::load_default();
-    let mut next_refresh = Instant::now();
+    let mut next_refresh = Instant::now() + REFRESH_INTERVAL;
     let mut redraw = true;
 
     loop {
@@ -162,6 +178,25 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
                 KeyCode::Char('q') => return Ok(()),
                 KeyCode::Esc | KeyCode::Char('?') => {
                     app.close_help();
+                    redraw = true;
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        if app.is_discovery_open() {
+            match key.code {
+                KeyCode::Char('q') => return Ok(()),
+                KeyCode::Char('d') | KeyCode::Char('r') => {
+                    app.retry_discovery();
+                    if let Err(_) | Ok(false) = worker.request_discover() {
+                        app.mark_worker_disconnected();
+                    }
+                    redraw = true;
+                }
+                KeyCode::Esc | KeyCode::Char('?') => {
+                    app.close_discovery();
                     redraw = true;
                 }
                 _ => {}
@@ -227,6 +262,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
                 next_refresh = Instant::now() + REFRESH_INTERVAL;
                 redraw = true;
             }
+            KeyCode::Char('d') => {
+                app.open_discovery();
+                if let Err(_) | Ok(false) = worker.request_discover() {
+                    app.mark_worker_disconnected();
+                }
+                redraw = true;
+            }
             _ => {}
         }
     }
@@ -235,6 +277,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
 fn request_refresh(worker: &PlanWorker, model_worker: &ModelUsageWorker, app: &mut App) {
     match worker.request_refresh() {
         Ok(true) => app.start_refresh(),
+
         Ok(false) => {}
         Err(_) => app.mark_worker_disconnected(),
     }

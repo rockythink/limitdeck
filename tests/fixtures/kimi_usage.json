@@ -1,0 +1,42 @@
+{
+    "generatedAt": 1789857109913,
+    "reports": [
+        {
+            "provider": "kimi-code",
+            "fetchedAt": 1789856835702,
+            "limits": [
+                {
+                    "id": "kimi-code:0",
+                    "label": "5h limit",
+                    "scope": {
+                        "provider": "kimi-code",
+                        "accountId": "cp*",
+                        "windowId": "5h",
+                        "shared": true
+                    },
+                    "window": {
+                        "id": "5h",
+                        "label": "5h limit",
+                        "durationMs": 18000000,
+                        "resetsAt": 1789869864643
+                    },
+                    "amount": {
+                        "unit": "unknown",
+                        "limit": 100,
+                        "used": 100,
+                        "usedFraction": 1,
+                        "remainingFraction": 0,
+                        "remaining": 0
+                    },
+                    "status": "exhausted"
+                }
+            ],
+            "metadata": {
+                "accountId": "cp*",
+                "endpoint": "https://api.kimi.com/coding/v1/usages"
+            }
+        }
+    ],
+    "accountsWithoutUsage": [],
+    "disabledCredentials": []
+}

@@ -3,8 +3,9 @@ use std::os::unix::process::CommandExt;
 use std::{
     io::{self, Read},
     process::{Command, Stdio},
+    sync::mpsc,
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::Deserialize;
@@ -41,10 +42,10 @@ fn spawn_error(error: &io::Error) -> AdapterError {
 pub struct OmpCodexAdapter;
 
 impl OmpCodexAdapter {
-    pub fn discover() -> Option<Self> {
-        run_command("omp", &["--version"], DISCOVERY_TIMEOUT)
-            .ok()
-            .map(|_| Self)
+    /// `known` comes from a shared OMP scan so callers do not shell out
+    /// once per provider.
+    pub fn discover_with(known: Option<bool>) -> Option<Self> {
+        known.filter(|known| *known).map(|_| Self)
     }
 }
 
@@ -59,9 +60,33 @@ impl PlanAdapter for OmpCodexAdapter {
             &["usage", "--provider", "openai-codex", "--json", "--redact"],
             OMP_TIMEOUT,
         )?;
-        parse_openai_codex(&output)
+        parse_provider_report(&output, "openai-codex", "openai", "Codex")
     }
 }
+
+pub struct OmpKimiAdapter;
+
+impl OmpKimiAdapter {
+    pub fn discover_with(known: Option<bool>) -> Option<Self> {
+        known.filter(|known| *known).map(|_| Self)
+    }
+}
+
+impl PlanAdapter for OmpKimiAdapter {
+    fn identity(&self) -> PlanIdentity {
+        PlanIdentity::new("kimi-code", "moonshot", "Kimi")
+    }
+
+    fn fetch(&self) -> Result<CodingPlan, AdapterError> {
+        let output = run_command(
+            "omp",
+            &["usage", "--provider", "kimi-code", "--json", "--redact"],
+            OMP_TIMEOUT,
+        )?;
+        parse_provider_report(&output, "kimi-code", "moonshot", "Kimi")
+    }
+}
+
 pub struct OmpModelUsageAdapter;
 
 impl OmpModelUsageAdapter {
@@ -152,7 +177,12 @@ fn optional_timestamp_millis(value: u64) -> Option<SystemTime> {
     UNIX_EPOCH.checked_add(Duration::from_millis(value))
 }
 
-fn run_command(program: &str, args: &[&str], timeout: Duration) -> Result<Vec<u8>, AdapterError> {
+pub(crate) fn run_command(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Vec<u8>, AdapterError> {
+    let started = Instant::now();
     let mut command = Command::new(program);
     command
         .args(args)
@@ -163,28 +193,34 @@ fn run_command(program: &str, args: &[&str], timeout: Duration) -> Result<Vec<u8
     command.process_group(0);
 
     let mut child = command.spawn().map_err(|error| spawn_error(&error))?;
+    crate::child_process::track(child.id());
     let Some(stdout) = child.stdout.take() else {
         stop_child(&mut child);
         return Err(protocol_error());
     };
-    let output_reader = thread::spawn(move || {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
         let mut output = Vec::new();
-        stdout
+        let result = stdout
             .take((MAX_OUTPUT_BYTES + 1) as u64)
             .read_to_end(&mut output)
             .map(|_| output)
-            .map_err(|_| protocol_error())
+            .map_err(|_| protocol_error());
+        let _ = sender.send(result);
     });
 
     let status = match child.wait_timeout(timeout) {
         Ok(Some(status)) => status,
         Ok(None) | Err(_) => {
             stop_child(&mut child);
-            let _ = output_reader.join();
             return Err(adapter_error(AdapterErrorKind::TimedOut));
         }
     };
-    let output = output_reader.join().map_err(|_| protocol_error())??;
+    // Reap inherited pipe holders too; never join a potentially blocked reader.
+    stop_child(&mut child);
+    let output = receiver
+        .recv_timeout(timeout.saturating_sub(started.elapsed()))
+        .map_err(|_| adapter_error(AdapterErrorKind::TimedOut))??;
 
     if !status.success() {
         return Err(adapter_error(AdapterErrorKind::NotAuthenticated));
@@ -202,6 +238,7 @@ fn stop_child(child: &mut std::process::Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
+    crate::child_process::forget(child.id());
 }
 
 #[derive(Deserialize)]
@@ -228,6 +265,7 @@ struct UsageLimit {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SourceWindow {
+    duration_ms: Option<u64>,
     resets_at: Option<u64>,
 }
 
@@ -235,8 +273,114 @@ struct SourceWindow {
 struct SourceAmount {
     remaining: u8,
 }
+/// Result of one `omp usage --json --redact` pass: which providers have
+/// authenticated accounts, with redacted identity hints.
+pub(crate) struct OmpUsageScan {
+    pub reports: Vec<OmpScanReport>,
+    pub accounts_without_usage: Vec<String>,
+}
 
-pub(crate) fn parse_openai_codex(input: &[u8]) -> Result<CodingPlan, AdapterError> {
+pub(crate) struct OmpScanReport {
+    pub provider: String,
+    pub account_hint: Option<String>,
+}
+
+impl OmpUsageScan {
+    pub(crate) fn knows(&self, provider: &str) -> bool {
+        self.reports
+            .iter()
+            .any(|report| report.provider == provider)
+            || self
+                .accounts_without_usage
+                .iter()
+                .any(|candidate| candidate == provider)
+    }
+
+    pub(crate) fn account_hint(&self, provider: &str) -> Option<String> {
+        self.reports
+            .iter()
+            .find(|report| report.provider == provider)
+            .and_then(|report| report.account_hint.clone())
+            .map(|hint| format!("account {hint}"))
+    }
+}
+
+/// `Some(true)` when OMP reports an authenticated account for the provider.
+/// The unfiltered usage scan omits providers without usage support, so
+/// per-provider probes are the only way to see them.
+pub(crate) fn provider_known(provider: &str) -> Option<bool> {
+    let output = run_command(
+        "omp",
+        &["usage", "--provider", provider, "--json", "--redact"],
+        OMP_TIMEOUT,
+    )
+    .ok()?;
+    let scan: ProviderScan = serde_json::from_slice(&output).ok()?;
+    Some(
+        !scan.reports.is_empty()
+            || scan
+                .accounts_without_usage
+                .iter()
+                .any(|account| account.provider == provider),
+    )
+}
+
+#[derive(Deserialize)]
+struct ProviderScan {
+    reports: Vec<ProviderScanReport>,
+    #[serde(rename = "accountsWithoutUsage")]
+    accounts_without_usage: Vec<ProviderScanAccount>,
+}
+
+#[derive(Deserialize)]
+struct ProviderScanReport {
+    provider: String,
+    metadata: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+#[derive(Deserialize)]
+struct ProviderScanAccount {
+    provider: String,
+}
+
+/// Ask OMP which providers have authenticated accounts. Redacted output
+/// keeps identity hints shareable; credential material is never touched.
+pub(crate) fn scan() -> Option<OmpUsageScan> {
+    let output = run_command("omp", &["usage", "--json", "--redact"], OMP_TIMEOUT).ok()?;
+    let scan: ProviderScan = serde_json::from_slice(&output).ok()?;
+    Some(OmpUsageScan {
+        reports: scan
+            .reports
+            .into_iter()
+            .map(|report| {
+                let hint = report
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| {
+                        metadata.get("accountId").or_else(|| metadata.get("email"))
+                    })
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned);
+                OmpScanReport {
+                    provider: report.provider,
+                    account_hint: hint,
+                }
+            })
+            .collect(),
+        accounts_without_usage: scan
+            .accounts_without_usage
+            .into_iter()
+            .map(|account| account.provider)
+            .collect(),
+    })
+}
+
+pub(crate) fn parse_provider_report(
+    input: &[u8],
+    id: &str,
+    provider_id: &str,
+    display_name: &str,
+) -> Result<CodingPlan, AdapterError> {
     let response: UsageResponse = serde_json::from_slice(input).map_err(|_| protocol_error())?;
     let report = response
         .reports
@@ -247,20 +391,27 @@ pub(crate) fn parse_openai_codex(input: &[u8]) -> Result<CodingPlan, AdapterErro
     let windows = report
         .limits
         .into_iter()
-        .map(|limit| UsageWindow {
-            period: codex_period(&limit.id),
-            id: limit.id,
-            label: limit.label,
-            remaining_percent: limit.amount.remaining.min(100),
-            resets_at: limit
+        .map(|limit| {
+            let period = limit
                 .window
-                .resets_at
-                .and_then(|value| timestamp_millis(value).ok()),
-            status: if limit.status == "ok" {
-                UsageStatus::Available
-            } else {
-                UsageStatus::Unavailable
-            },
+                .duration_ms
+                .map(Duration::from_millis)
+                .or_else(|| codex_period(&limit.id));
+            UsageWindow {
+                period,
+                id: limit.id,
+                label: limit.label,
+                remaining_percent: limit.amount.remaining.min(100),
+                resets_at: limit
+                    .window
+                    .resets_at
+                    .and_then(|value| timestamp_millis(value).ok()),
+                status: if limit.status == "ok" {
+                    UsageStatus::Available
+                } else {
+                    UsageStatus::Unavailable
+                },
+            }
         })
         .collect::<Vec<_>>();
 
@@ -269,9 +420,9 @@ pub(crate) fn parse_openai_codex(input: &[u8]) -> Result<CodingPlan, AdapterErro
     }
 
     Ok(CodingPlan {
-        id: "openai-codex".to_owned(),
-        provider_id: "openai".to_owned(),
-        display_name: "Codex".to_owned(),
+        id: id.to_owned(),
+        provider_id: provider_id.to_owned(),
+        display_name: display_name.to_owned(),
         fetched_at,
         windows,
     })
@@ -301,7 +452,8 @@ mod tests {
 
     #[test]
     fn parses_only_the_usage_contract() {
-        let plan = parse_openai_codex(USAGE_FIXTURE).expect("fixture should match the contract");
+        let plan = parse_provider_report(USAGE_FIXTURE, "openai-codex", "openai", "Codex")
+            .expect("fixture should match the contract");
 
         assert_eq!(plan.id, "openai-codex");
         assert_eq!(plan.provider_id, "openai");
@@ -323,6 +475,28 @@ mod tests {
         ] {
             assert!(!retained_data.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn parses_kimi_usage_report_with_duration_windows() {
+        let fixture = include_bytes!("../../tests/fixtures/kimi_usage.json");
+        let plan = parse_provider_report(fixture, "kimi-code", "moonshot", "Kimi")
+            .expect("kimi fixture should match the contract");
+
+        assert_eq!(plan.id, "kimi-code");
+        assert_eq!(plan.provider_id, "moonshot");
+        assert_eq!(plan.windows.len(), 1);
+        assert_eq!(plan.windows[0].label, "5h limit");
+        assert_eq!(
+            plan.windows[0].period,
+            Some(Duration::from_secs(5 * 60 * 60))
+        );
+        assert_eq!(plan.windows[0].remaining_percent, 0);
+        assert_eq!(plan.windows[0].status, UsageStatus::Unavailable);
+        assert_eq!(
+            plan.windows[0].resets_at,
+            Some(UNIX_EPOCH + Duration::from_millis(1789869864643))
+        );
     }
 
     #[test]

@@ -98,21 +98,48 @@ limitdeck
 
 LimitDeck 会自动发现已经安装并登录的 Codex CLI，不需要额外登录 LimitDeck。
 
+## 无界面额度快照
+
+```bash
+limitdeck snapshot --json
+```
+
+一次采集后退出，不打开 TUI、不读取模型用量历史。复用仪表盘的同一套发现逻辑：已有 Claude status-line 缓存、已登录 Codex CLI（通过 `codex login status` 判断）、OMP 账户（Kimi，以及 Codex、GLM 备用来源），以及 Claude Code 配置中的 Anthropic 兼容端点。OMP 自行选择已认证账户；LimitDeck 不读取、也不展示凭证，不会自动登录。界面偏好不会隐藏快照中的额度窗口。
+
+JSON 使用 `version: 1`。`collected_at` 和每个套餐的 `fetched_at` 为 Unix 秒；`plans` 中每项包含 `id`、`name`、`windows`、`error`。窗口包含 `label`、`remaining_percent`（0–100，不可用时为 `null`）、`resets_at`（Unix 秒或 `null`）。窗口标签仅由额度元数据标准化生成，不复制任意远端文本；不输出邮箱、凭证、账户标识、本地路径，也不推测当前模型。
+
+单个来源失败不会影响其他套餐；失败项保留安全错误码和空窗口。错误码包括 `command_not_found`、`not_authenticated`、`timed_out`、`protocol_changed`、`snapshot_missing`、`snapshot_expired`。没有可用来源时输出 `plans: []`；部分来源失败仍以成功状态退出，由调用方逐项处理。发现命令均有时限（CLI 探测 2 秒，OMP 账户扫描 12 秒），并发采集限时 18 秒。SIGTERM/SIGINT 会停止本次快照启动的 adapter 进程组，不影响已经运行的独立 TUI。
+
 ## 数据来源
 
 | 订阅 | 本地来源 | 支持状态 |
 | --- | --- | :---: |
 | Codex | 官方 Codex App Server，`account/rateLimits/read` | 内置 |
 | Claude | 官方 Claude Code status-line JSON | 内置 |
+| Kimi | OMP 脱敏用量输出（`kimi-code`） | 可选 |
+| GLM Coding Plan | 智谱额度接口，令牌来自 OMP、`Z_AI_API_KEY` 或 Claude Code 配置 | 可选 |
 | Codex 备用来源 | OMP 脱敏用量输出 | 可选 |
 
-Codex App Server 与 OMP 备用来源同时可用时，LimitDeck 优先使用 App Server。
+Codex App Server 与 OMP 备用来源同时可用时，LimitDeck 优先使用 App Server。GLM 适配器只使用 coding plan 令牌鉴权，不读取 OMP 的凭证存储——由 OMP 自己的 `omp token` 命令交出令牌。
 
 ```text
 官方本地协议 ─┐
 纯额度快照 ───┼─> 标准化额度窗口 ─> LimitDeck
 可选脱敏输出 ─┘
 ```
+
+## 主动发现订阅
+
+按 <kbd>d</kbd> 扫描本机已配置的订阅并打开「订阅发现」面板。扫描在后台进行，界面照常可用；新发现的订阅会立即加入监控。
+
+扫描顺序：
+
+1. Claude Code status-line 缓存；
+2. 已登录的 Codex CLI（`codex login status`）；
+3. OMP 账户（`omp usage --json --redact`）；
+4. `~/.claude/settings.json` 与 `settings.local.json` 中配置的 Anthropic 兼容端点。
+
+面板每行一个来源，显示订阅名、是否已监控、凭证位置；对 OMP 账户额外显示已脱敏的账号提示与端点主机。没有额度接口的来源会明确标注「未监控」而不是隐藏。订阅卡片先进入加载态，各提供方返回后自动填充；随时按 <kbd>r</kbd> 刷新当前集合。
 
 ## 本地模型用量
 
@@ -204,6 +231,7 @@ GPT-5.3-Codex-Spark 窗口作为次要限额，默认隐藏。有可用窗口时
 | <kbd>Enter</kbd> | 打开或关闭订阅详情 |
 | <kbd>Esc</kbd> | 返回列表，再按一次退出 |
 | <kbd>r</kbd> | 刷新数据来源 |
+| <kbd>d</kbd> | 发现并监控本机已配置的订阅 |
 | <kbd>m</kbd> / <kbd>Tab</kbd> | 切换额度与模型用量 |
 | <kbd>f</kbd> | 在 24 小时、7 天、30 天和全部模型用量之间切换 |
 | <kbd>s</kbd> | 显示或隐藏次要限额 |
@@ -240,10 +268,13 @@ LimitDeck 只保留绘制仪表盘所必需的最小状态。
 | 剩余百分比、重置时间和用量时间戳 | 组织与订阅等级 |
 | Agent 本地报告的模型成本 | 提供方账单明细 |
 | 历史时间戳、可用状态和界面偏好 | 原始凭据与提供方响应 |
+| 仅存在于本次会话内存中的发现结果：订阅名、已脱敏的账号提示、端点主机 | 配置文件、凭证存储和账号标识不落盘 |
 
 解析器输入与子进程输出都有大小上限。子进程有明确超时，并会在退出时回收。
 
 诊断信息只保留固定的数据来源标签和安全的失败类别。原始 stderr、提供方载荷、凭据、账户字段、邮箱地址和本地路径都不会保存在应用状态中。
+
+GLM Coding Plan 适配器是唯一直接访问提供方的数据源：拿到 coding plan 令牌后，向该令牌所在区域的智谱额度接口发送一次带鉴权的 HTTPS 请求。令牌来自 `Z_AI_API_KEY` 等环境变量、Claude Code 配置或 `omp token`，只存在于内存中，不会写入偏好、历史、日志或发现面板。发现面板只显示凭证的**位置**，从不显示其值。
 
 ## 数据来源无法刷新时
 
@@ -256,6 +287,8 @@ LimitDeck 只保留绘制仪表盘所必需的最小状态。
 | 来源响应超时 | 检查网络，再按 <kbd>r</kbd> 重试 |
 | 提供方协议变化 | 升级 LimitDeck；问题仍存在时提交 Issue |
 | Claude 快照缺失 | 将 `limitdeck ingest claude` 配置为 Claude Code 状态栏 |
+| 未列出 Kimi 或 GLM | 按 <kbd>d</kbd> 重新扫描；确认该账户已登录 OMP，或为 GLM 设置 `Z_AI_API_KEY` |
+| GLM 提示无 coding plan | 该令牌所属账号没有 GLM Coding Plan；请用订阅对应的令牌设置 `Z_AI_API_KEY` |
 | 缓存快照过期 | 刷新数据来源后再按 <kbd>r</kbd> |
 
 ## 架构
@@ -272,7 +305,7 @@ LimitDeck 只保留绘制仪表盘所必需的最小状态。
                       应用状态 → TUI
 ```
 
-适配器负责各提供方的解析和超时策略；领域层和 UI 不依赖 Codex、Claude 或 OMP 的响应格式。
+适配器负责各提供方的解析和超时策略；领域层和 UI 不依赖 Codex、Claude、OMP、Kimi 或智谱的响应格式。
 
 ## 开发
 

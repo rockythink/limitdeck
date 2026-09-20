@@ -98,21 +98,49 @@ limitdeck
 
 LimitDeck automatically discovers an installed and authenticated Codex CLI. There is no separate LimitDeck login.
 
+## Headless quota snapshot
+
+```bash
+limitdeck snapshot --json
+```
+
+Collect once and exit without opening a terminal UI or reading model-usage history. This uses the same adapter discovery as the dashboard: an existing Claude status-line cache, an authenticated Codex CLI (`codex login status`), OMP accounts (Kimi, and the Codex or GLM fallbacks), and Anthropic-compatible endpoints in Claude Code settings. OMP itself selects authenticated accounts; LimitDeck never reads credentials and never displays them. No new login is attempted. Visual preferences do not suppress snapshot windows.
+
+The JSON contract is versioned (`version: 1`): `collected_at` and per-plan `fetched_at` are Unix seconds; `plans` contain `id`, `name`, `windows`, and `error`. Each window contains `label`, `remaining_percent` (0–100, or `null` when unavailable), and `resets_at` (Unix seconds or `null`). Labels are normalized from quota metadata, never copied from account or arbitrary remote text. No email, credential, account identifier, local path, or inferred current model is exported.
+
+Provider failures are independent: healthy plans remain available while a failed plan has empty windows and a safe error code (`command_not_found`, `not_authenticated`, `timed_out`, `protocol_changed`, `snapshot_missing`, or `snapshot_expired`). When no source is discovered, the command returns `plans: []`; partial failures still exit successfully so consumers can inspect each plan. Discovery commands are bounded (2 s for CLI probes, 12 s for the OMP account scan) and concurrent collection has an 18-second deadline. SIGTERM/SIGINT stop snapshot-owned adapter process groups without touching an existing dashboard.
+
 ## Data sources
 
 | Plan | Local source | Support |
 | --- | --- | :---: |
 | Codex | Official Codex App Server, `account/rateLimits/read` | Built in |
 | Claude | Official Claude Code status-line JSON | Built in |
+| Kimi | OMP redacted usage output (`kimi-code`) | Optional |
+| GLM Coding Plan | Zhipu quota API with a coding-plan token resolved from OMP, `Z_AI_API_KEY`, or Claude Code settings | Optional |
 | Codex fallback | OMP redacted usage output | Optional |
 
-The Codex App Server is preferred whenever both it and the OMP fallback are available.
+The Codex App Server is preferred whenever both it and the OMP fallback are available. The GLM adapter authenticates with the coding-plan token only; it never reads OMP's credential store — OMP hands the token over its own `omp token` command.
 
 ```text
 official local protocol ─┐
 quota-only snapshot ─────┼─> normalized usage windows ─> LimitDeck
 optional redacted output ┘
 ```
+
+## Discovering subscriptions
+
+Press <kbd>d</kbd> to scan this machine for configured subscriptions and open the Discovery panel. The scan runs in the background while the dashboard stays usable, and every newly found plan joins monitoring immediately.
+
+The scan inspects, in order:
+
+1. the Claude Code status-line cache,
+2. an authenticated Codex CLI (`codex login status`),
+3. OMP accounts (`omp usage --json --redact`),
+4. Anthropic-compatible endpoints configured in `~/.claude/settings.json` and `settings.local.json`.
+
+The panel lists one row per source found: plan name, whether LimitDeck monitors it, where the credentials live, and — for OMP accounts — the already-redacted account hint plus the endpoint host. Sources without a quota API are shown as `Not monitored` rather than hidden, so the inventory stays honest. Plan cards start in a loading state and fill in as each provider answers; press <kbd>r</kbd> to refresh the current set at any time.
+
 
 ## Local model usage
 
@@ -204,6 +232,7 @@ Theme changes apply immediately and are restored the next time LimitDeck starts.
 | <kbd>Enter</kbd> | Open or close plan details |
 | <kbd>Esc</kbd> | Return to the list, then exit |
 | <kbd>r</kbd> | Refresh sources |
+| <kbd>d</kbd> | Discover subscriptions on this machine |
 | <kbd>m</kbd> / <kbd>Tab</kbd> | Switch between quotas and model usage |
 | <kbd>f</kbd> | Cycle the model usage range through 24h, 7d, 30d, and All |
 | <kbd>s</kbd> | Show or hide secondary limits |
@@ -240,10 +269,13 @@ LimitDeck retains the minimum state needed to draw the dashboard.
 | Remaining percentages, reset times, and usage timestamps | Organization and plan tier |
 | Locally reported model cost | Provider billing statements |
 | History timestamps, availability state, and interface preferences | Raw credentials and provider responses |
+| Discovery results held in memory for the current session: plan names, already-redacted account hints, and endpoint hosts | Settings files, credential stores, and account identifiers copied to disk |
 
 Parser inputs and subprocess output are size-bounded. Child processes have explicit timeouts and are reaped on exit.
 
 Diagnostics keep only a fixed source label and a safe failure category. Raw stderr, provider payloads, credentials, account fields, email addresses, and local paths are never retained in application state.
+
+The GLM Coding Plan adapter is the only source that talks to a provider directly: when a coding-plan token is available, it sends one authenticated HTTPS request to the Zhipu quota endpoint for that token's region. Tokens come from `Z_AI_API_KEY` and friends, Claude Code settings, or `omp token`, are kept in memory only, and are never written to preferences, history, logs, or the discovery panel. The discovery panel shows the credential's *location*, never its value.
 
 ## When a source cannot refresh
 
@@ -256,6 +288,8 @@ A failing source stays visible. If a previous snapshot exists, LimitDeck marks i
 | Timed out | Check the network and retry with <kbd>r</kbd> |
 | Provider protocol changed | Upgrade LimitDeck; open an issue if the failure remains |
 | Claude snapshot missing | Configure `limitdeck ingest claude` as the Claude Code status line |
+| Kimi or GLM not listed | Press <kbd>d</kbd> to rescan; confirm the account is signed in to OMP, or set `Z_AI_API_KEY` for GLM |
+| GLM reports no coding plan | The token belongs to an account without a GLM Coding Plan; point LimitDeck at the plan's token via `Z_AI_API_KEY` |
 | Cached snapshot expired | Refresh the source with <kbd>r</kbd> |
 
 ## Architecture
@@ -272,7 +306,7 @@ official protocols / safe snapshots / metadata-only local records
                        App state → TUI
 ```
 
-Adapters own provider-specific parsing and timeouts. The domain and UI do not depend on Codex, Claude, or OMP response formats.
+Adapters own provider-specific parsing and timeouts. The domain and UI do not depend on Codex, Claude, OMP, Kimi, or Zhipu response formats.
 
 ## Development
 

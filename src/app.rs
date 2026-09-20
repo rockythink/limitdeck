@@ -11,6 +11,7 @@ use std::{
 
 use crate::{
     adapter::{AdapterError, AdapterErrorKind, PlanAdapter},
+    adapters::{self, DiscoveryEntry},
     domain::{CodingPlan, ModelUsage, PlanIdentity},
     locale::Language,
     model_usage::ModelUsageEvent,
@@ -146,6 +147,8 @@ pub struct App {
     view: DashboardView,
     help_open: bool,
     detail_open: bool,
+    discovery_open: bool,
+    discovery_entries: Option<Vec<DiscoveryEntry>>,
     theme: Theme,
     language: Language,
     secondary_limits_visible: bool,
@@ -169,6 +172,8 @@ impl App {
             view: DashboardView::default(),
             help_open: false,
             detail_open: false,
+            discovery_open: false,
+            discovery_entries: None,
             theme: Theme::default(),
             language: Language::detect(),
             secondary_limits_visible: false,
@@ -263,6 +268,50 @@ impl App {
         self.language
     }
 
+    pub fn is_discovery_open(&self) -> bool {
+        self.discovery_open
+    }
+
+    pub fn open_discovery(&mut self) {
+        self.discovery_open = true;
+    }
+
+    pub fn close_discovery(&mut self) -> bool {
+        let was_open = self.discovery_open;
+        self.discovery_open = false;
+        was_open
+    }
+
+    pub fn discovery_entries(&self) -> Option<&[DiscoveryEntry]> {
+        self.discovery_entries.as_deref()
+    }
+
+    /// A requested rescan clears previous results so the panel can show that
+    /// the scan is running again.
+    pub fn retry_discovery(&mut self) {
+        self.discovery_entries = None;
+    }
+
+    /// Merge a fresh discovery scan: newly found plans join monitoring in
+    /// the loading phase, and the panel data is replaced wholesale.
+    pub fn apply_discovery(
+        &mut self,
+        identities: impl IntoIterator<Item = PlanIdentity>,
+        entries: Vec<DiscoveryEntry>,
+    ) {
+        let mut seen = self
+            .plans
+            .iter()
+            .map(|plan| plan.identity.id.clone())
+            .collect::<HashSet<_>>();
+        for identity in identities {
+            if seen.insert(identity.id.clone()) {
+                self.plans.push(PlanState::new(identity));
+            }
+        }
+        self.discovery_entries = Some(entries);
+    }
+
     pub fn cycle_language(&mut self) {
         self.language = self.language.next();
     }
@@ -336,13 +385,22 @@ impl App {
     }
 
     pub fn apply_event(&mut self, event: PlanEvent) {
-        let PlanEvent::Fetched { identity, result } = event;
-        if let Some(plan) = self
-            .plans
-            .iter_mut()
-            .find(|plan| plan.identity.id == identity.id)
-        {
-            plan.apply(result);
+        match event {
+            PlanEvent::Discovery {
+                identities,
+                entries,
+            } => {
+                self.apply_discovery(identities, entries);
+            }
+            PlanEvent::Fetched { identity, result } => {
+                if let Some(plan) = self
+                    .plans
+                    .iter_mut()
+                    .find(|plan| plan.identity.id == identity.id)
+                {
+                    plan.apply(result);
+                }
+            }
         }
     }
     pub fn apply_model_usage_event(&mut self, event: ModelUsageEvent) {
@@ -419,12 +477,17 @@ impl App {
 #[derive(Clone, Copy)]
 enum WorkerCommand {
     Refresh,
+    Discover,
 }
 
 pub enum PlanEvent {
     Fetched {
         identity: PlanIdentity,
         result: Result<CodingPlan, AdapterError>,
+    },
+    Discovery {
+        identities: Vec<PlanIdentity>,
+        entries: Vec<DiscoveryEntry>,
     },
 }
 
@@ -438,21 +501,29 @@ pub struct PlanWorker {
 
 impl PlanWorker {
     pub fn spawn(adapters: Vec<Box<dyn PlanAdapter>>) -> Self {
-        let adapters: Vec<Arc<dyn PlanAdapter>> = adapters.into_iter().map(Arc::from).collect();
+        let mut adapters: Vec<Arc<dyn PlanAdapter>> = adapters.into_iter().map(Arc::from).collect();
         let (command_tx, command_rx) = mpsc::sync_channel(1);
         let (event_tx, event_rx) = mpsc::channel();
         thread::spawn(move || {
-            while let Ok(WorkerCommand::Refresh) = command_rx.recv() {
-                thread::scope(|scope| {
-                    for adapter in &adapters {
-                        let events = event_tx.clone();
-                        scope.spawn(move || {
-                            let identity = adapter.identity();
-                            let result = adapter.fetch();
-                            let _ = events.send(PlanEvent::Fetched { identity, result });
+            while let Ok(command) = command_rx.recv() {
+                match command {
+                    WorkerCommand::Discover => {
+                        let (discovered, report) = adapters::discover_with_report();
+                        let identities = discovered
+                            .iter()
+                            .map(|adapter| adapter.identity())
+                            .collect::<Vec<_>>();
+                        adapters = discovered.into_iter().map(Arc::from).collect();
+                        let _ = event_tx.send(PlanEvent::Discovery {
+                            identities,
+                            entries: report.entries,
                         });
+                        fetch_all(&adapters, &event_tx);
                     }
-                });
+                    WorkerCommand::Refresh => {
+                        fetch_all(&adapters, &event_tx);
+                    }
+                }
             }
         });
         Self {
@@ -462,7 +533,15 @@ impl PlanWorker {
     }
 
     pub fn request_refresh(&self) -> Result<bool, WorkerStopped> {
-        match self.commands.try_send(WorkerCommand::Refresh) {
+        self.request(WorkerCommand::Refresh)
+    }
+
+    pub fn request_discover(&self) -> Result<bool, WorkerStopped> {
+        self.request(WorkerCommand::Discover)
+    }
+
+    fn request(&self, command: WorkerCommand) -> Result<bool, WorkerStopped> {
+        match self.commands.try_send(command) {
             Ok(()) => Ok(true),
             Err(TrySendError::Full(_)) => Ok(false),
             Err(TrySendError::Disconnected(_)) => Err(WorkerStopped),
@@ -478,12 +557,60 @@ impl PlanWorker {
     }
 }
 
+fn fetch_all(adapters: &[Arc<dyn PlanAdapter>], events: &mpsc::Sender<PlanEvent>) {
+    thread::scope(|scope| {
+        for adapter in adapters {
+            let events = events.clone();
+            scope.spawn(move || {
+                let identity = adapter.identity();
+                let result = adapter.fetch();
+                let _ = events.send(PlanEvent::Fetched { identity, result });
+            });
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn discovery_merges_new_plans_without_duplicating_existing_ones() {
+        let mut app = App::new([PlanIdentity::new("claude", "anthropic", "Claude")]);
+
+        app.apply_discovery(
+            [
+                PlanIdentity::new("claude", "anthropic", "Claude"),
+                PlanIdentity::new("kimi-code", "moonshot", "Kimi"),
+            ],
+            vec![DiscoveryEntry {
+                label: "Kimi".to_owned(),
+                provider_id: "moonshot".to_owned(),
+                source: "OMP account",
+                monitored: true,
+                note: None,
+            }],
+        );
+
+        assert_eq!(app.plans().len(), 2);
+        assert_eq!(app.plans()[1].identity.id, "kimi-code");
+        assert_eq!(app.plans()[1].phase, PlanPhase::Loading);
+        assert_eq!(
+            app.discovery_entries().map(<[DiscoveryEntry]>::len),
+            Some(1)
+        );
+
+        app.apply_discovery(
+            [PlanIdentity::new("kimi-code", "moonshot", "Kimi")],
+            Vec::new(),
+        );
+        assert_eq!(app.plans().len(), 2);
+        assert!(app
+            .discovery_entries()
+            .is_some_and(<[DiscoveryEntry]>::is_empty));
+    }
+
     use crate::domain::{UsageStatus, UsageWindow};
     use std::time::SystemTime;
-
     struct TestAdapter {
         identity: PlanIdentity,
         delay: Duration,

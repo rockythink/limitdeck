@@ -52,9 +52,9 @@ impl Language {
     pub const fn copy(self) -> UiCopy {
         match self {
             Self::English => UiCopy {
-                list_footer_prefix: "  ↑↓/jk Select · Enter Details · r Refresh · t ",
-                model_footer_prefix: "  ↑↓/jk Select · m Quotas · r Refresh · t ",
-                detail_footer_prefix: "  Esc Back · r Refresh · t ",
+                list_footer_prefix: "  ↑↓/jk Select · Enter Details · d Discover · r Refresh · t ",
+                model_footer_prefix: "  ↑↓/jk Select · m Quotas · d Discover · r Refresh · t ",
+                detail_footer_prefix: "  Esc Back · d Discover · r Refresh · t ",
                 footer_language_separator: " · l ",
                 footer_quit: " · q Quit",
                 no_plans: "No coding plans found",
@@ -70,11 +70,17 @@ impl Language {
                 loading: "Loading",
                 stale: "Cached",
                 unavailable: "Unavailable · Enter for details",
+                discovery_title: "Discovery",
+                discovery_scanning: "Scanning this machine for subscriptions…",
+                discovery_hint: "d Rescan",
+                discovery_monitored: "Monitored",
+                discovery_not_monitored: "Not monitored",
+                discovery_none: "No subscription sources detected",
             },
             Self::Chinese => UiCopy {
-                list_footer_prefix: "  ↑↓/jk 选择 · Enter 详情 · r 刷新 · t ",
-                model_footer_prefix: "  ↑↓/jk 选择 · m 额度 · r 刷新 · t ",
-                detail_footer_prefix: "  Esc 返回 · r 刷新 · t ",
+                list_footer_prefix: "  ↑↓/jk 选择 · Enter 详情 · d 发现 · r 刷新 · t ",
+                model_footer_prefix: "  ↑↓/jk 选择 · m 额度 · d 发现 · r 刷新 · t ",
+                detail_footer_prefix: "  Esc 返回 · d 发现 · r 刷新 · t ",
                 footer_language_separator: " · l ",
                 footer_quit: " · q 退出",
                 no_plans: "未发现 Coding Plan",
@@ -90,6 +96,12 @@ impl Language {
                 loading: "加载中",
                 stale: "缓存",
                 unavailable: "不可用 · Enter 查看原因",
+                discovery_title: "订阅发现",
+                discovery_scanning: "正在扫描本机已配置的订阅…",
+                discovery_hint: "d 重新扫描",
+                discovery_monitored: "已监控",
+                discovery_not_monitored: "未监控",
+                discovery_none: "未检测到订阅来源",
             },
         }
     }
@@ -123,6 +135,12 @@ pub struct UiCopy {
     pub loading: &'static str,
     pub stale: &'static str,
     pub unavailable: &'static str,
+    pub discovery_title: &'static str,
+    pub discovery_scanning: &'static str,
+    pub discovery_hint: &'static str,
+    pub discovery_monitored: &'static str,
+    pub discovery_not_monitored: &'static str,
+    pub discovery_none: &'static str,
 }
 
 #[cfg(test)]

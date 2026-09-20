@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::{
     collections::BTreeMap,
     io::{self, BufRead, BufReader, Read, Write},
@@ -67,7 +69,7 @@ pub struct CodexAppServerAdapter;
 
 impl CodexAppServerAdapter {
     pub fn discover() -> Option<Self> {
-        command_succeeds("codex", &["--version"], DISCOVERY_TIMEOUT).then_some(Self)
+        command_succeeds("codex", &["login", "status"], DISCOVERY_TIMEOUT).then_some(Self)
     }
 }
 
@@ -82,13 +84,16 @@ impl PlanAdapter for CodexAppServerAdapter {
 }
 
 fn fetch_from_app_server() -> Result<CodingPlan, AdapterError> {
-    let mut child = Command::new("codex")
+    let mut command = Command::new("codex");
+    command
         .args(["app-server", "--listen", "stdio://"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| spawn_error(&error))?;
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command.spawn().map_err(|error| spawn_error(&error))?;
+    crate::child_process::track(child.id());
     let Some(mut stdin) = child.stdin.take() else {
         stop_child(&mut child);
         return Err(protocol_error());
@@ -98,7 +103,7 @@ fn fetch_from_app_server() -> Result<CodingPlan, AdapterError> {
         return Err(protocol_error());
     };
     let (messages, receiver) = mpsc::sync_channel(4);
-    let reader = thread::spawn(move || {
+    thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         loop {
             match read_bounded_line(&mut reader) {
@@ -150,7 +155,6 @@ fn fetch_from_app_server() -> Result<CodingPlan, AdapterError> {
     drop(stdin);
     drop(receiver);
     stop_child(&mut child);
-    let _ = reader.join();
     result
 }
 fn read_bounded_line(reader: &mut impl BufRead) -> Result<Option<String>, AdapterError> {
@@ -179,22 +183,36 @@ fn write_message(stdin: &mut impl Write, message: &str) -> Result<(), AdapterErr
 }
 
 fn stop_child(child: &mut Child) {
+    #[cfg(unix)]
+    if let Ok(group) = i32::try_from(child.id()) {
+        // SAFETY: this child was started in its own process group.
+        unsafe {
+            libc::kill(-group, libc::SIGKILL);
+        }
+    }
     let _ = child.kill();
     let _ = child.wait();
+    crate::child_process::forget(child.id());
 }
 
 fn command_succeeds(program: &str, args: &[&str], timeout: Duration) -> bool {
-    let Ok(mut child) = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    command.process_group(0);
+    let Ok(mut child) = command.spawn() else {
         return false;
     };
+    crate::child_process::track(child.id());
     match child.wait_timeout(timeout) {
-        Ok(Some(status)) => status.success(),
+        Ok(Some(status)) => {
+            stop_child(&mut child);
+            status.success()
+        }
         Ok(None) | Err(_) => {
             stop_child(&mut child);
             false

@@ -44,6 +44,8 @@ pub fn render(frame: &mut Frame<'_>, app: &App, history: &UsageHistory) {
 
     if app.is_help_open() {
         render_help(frame, content_area, palette, language);
+    } else if app.is_discovery_open() {
+        render_discovery(frame, content_area, app, palette, language);
     } else {
         match (app.dashboard_view(), app.is_detail_open()) {
             (DashboardView::Quotas, true) => {
@@ -63,6 +65,17 @@ pub fn render(frame: &mut Frame<'_>, app: &App, history: &UsageHistory) {
             let footer = match language {
                 Language::English => "  ? / Esc Close · q Quit",
                 Language::Chinese => "  ? / Esc 关闭 · q 退出",
+            };
+            render_line(
+                frame,
+                footer_area,
+                vec![Span::styled(footer, Style::default().fg(palette.muted))],
+                palette.background,
+            );
+        } else if app.is_discovery_open() {
+            let footer = match language {
+                Language::English => "  d Rescan · Esc Close · q Quit",
+                Language::Chinese => "  d 重新扫描 · Esc 关闭 · q 退出",
             };
             render_line(
                 frame,
@@ -96,7 +109,6 @@ pub fn render(frame: &mut Frame<'_>, app: &App, history: &UsageHistory) {
         }
     }
 }
-
 fn compact_footer(
     width: u16,
     view: DashboardView,
@@ -105,29 +117,29 @@ fn compact_footer(
 ) -> &'static str {
     if width < 48 {
         return match (view, detail_open) {
-            (DashboardView::Quotas, true) => "  Esc · m · r · ? · q",
-            (DashboardView::Quotas, false) => "  ↑↓ · Enter · m · r · ? · q",
-            (DashboardView::Models, _) => "  ↑↓ · f · m · r · ? · q",
+            (DashboardView::Quotas, true) => "  Esc · d · m · r · ? · q",
+            (DashboardView::Quotas, false) => "  ↑↓ · Enter · d · m · r · ? · q",
+            (DashboardView::Models, _) => "  ↑↓ · f · d · m · r · ? · q",
         };
     }
     match (view, detail_open, language) {
         (DashboardView::Quotas, true, Language::English) => {
-            "  Esc Back · m View · r Refresh · ? Help · q Quit"
+            "  Esc Back · d Discover · m View · r Refresh · ? Help · q Quit"
         }
         (DashboardView::Quotas, true, Language::Chinese) => {
-            "  Esc 返回 · m 视图 · r 刷新 · ? 帮助 · q 退出"
+            "  Esc 返回 · d 发现 · m 视图 · r 刷新 · ? 帮助 · q 退出"
         }
         (DashboardView::Quotas, false, Language::English) => {
-            "  ↑↓ Move · Enter Details · m View · r Refresh · ? · q"
+            "  ↑↓ Move · Enter Details · d Discover · m View · r Refresh · ? · q"
         }
         (DashboardView::Quotas, false, Language::Chinese) => {
-            "  ↑↓ 选择 · Enter 详情 · m 视图 · r 刷新 · ? · q"
+            "  ↑↓ 选择 · Enter 详情 · d 发现 · m 视图 · r 刷新 · ? · q"
         }
         (DashboardView::Models, _, Language::English) => {
-            "  ↑↓ Move · f Range · m Quotas · r Refresh · ? · q"
+            "  ↑↓ Move · f Range · d Discover · m Quotas · r Refresh · ? · q"
         }
         (DashboardView::Models, _, Language::Chinese) => {
-            "  ↑↓ 选择 · f 范围 · m 额度 · r 刷新 · ? · q"
+            "  ↑↓ 选择 · f 范围 · d 发现 · m 额度 · r 刷新 · ? · q"
         }
     }
 }
@@ -203,6 +215,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: Palette, language: La
                 Line::from("  ↑↓/jk Select · Enter Details"),
                 Line::from("  m Quotas/Models · f Time range"),
                 Line::from("  s Secondary limits · r Refresh"),
+                Line::from("  d Discover subscriptions"),
                 Line::from("  t Theme · l Language"),
                 Line::from("  ?/Esc Close · q Quit"),
             ],
@@ -216,6 +229,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: Palette, language: La
                 Line::from("  ↑↓/jk 选择 · Enter 详情"),
                 Line::from("  m 额度/模型 · f 时间范围"),
                 Line::from("  s 次要限额 · r 刷新"),
+                Line::from("  d 发现本机订阅"),
                 Line::from("  t 主题 · l 语言"),
                 Line::from("  ?/Esc 关闭 · q 退出"),
             ],
@@ -251,6 +265,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: Palette, language: La
                     "  Actions",
                     Style::default().fg(palette.warning),
                 )),
+                Line::from("  d  Discover subscriptions on this machine"),
                 Line::from("  r  Refresh · ? / Esc  Close help · q  Quit"),
             ],
             Language::Chinese => vec![
@@ -268,6 +283,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: Palette, language: La
                 Line::from(Span::styled("  偏好", Style::default().fg(palette.warning))),
                 Line::from("  t  主题 · l  语言"),
                 Line::from(Span::styled("  操作", Style::default().fg(palette.warning))),
+                Line::from("  d  发现并监控本机已配置的订阅"),
                 Line::from("  r  刷新 · ? / Esc  关闭帮助 · q  退出"),
             ],
         }
@@ -278,6 +294,84 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: Palette, language: La
     );
 }
 
+fn render_discovery(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    palette: Palette,
+    language: Language,
+) {
+    if area.is_empty() {
+        return;
+    }
+    let copy = language.copy();
+    let narrow = area.width < 72;
+    let label_width: usize = if narrow { 18 } else { 26 };
+    let status_width: usize = if narrow { 10 } else { 14 };
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("  {}", copy.discovery_title),
+        Style::default()
+            .fg(palette.text)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    match app.discovery_entries() {
+        None => {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", copy.discovery_scanning),
+                Style::default().fg(palette.muted),
+            )));
+        }
+        Some([]) => {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", copy.discovery_none),
+                Style::default().fg(palette.muted),
+            )));
+        }
+        Some(entries) => {
+            for entry in entries {
+                let accent = provider_accent(&entry.provider_id, palette);
+                let (status_color, status_text) = if entry.monitored {
+                    (palette.healthy, copy.discovery_monitored)
+                } else {
+                    (palette.muted, copy.discovery_not_monitored)
+                };
+                let mut spans = vec![
+                    Span::styled("  ● ", Style::default().fg(status_color)),
+                    Span::styled(
+                        format!("{:<width$}", entry.label, width = label_width),
+                        Style::default().fg(accent),
+                    ),
+                    Span::styled(
+                        format!("{:<width$}", status_text, width = status_width),
+                        Style::default().fg(status_color),
+                    ),
+                    Span::styled(entry.source, Style::default().fg(palette.muted)),
+                ];
+                if let Some(note) = &entry.note {
+                    spans.push(Span::styled(
+                        format!(" · {note}"),
+                        Style::default().fg(palette.muted),
+                    ));
+                }
+                lines.push(Line::from(spans));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("  {}", copy.discovery_hint),
+                Style::default().fg(palette.muted),
+            )));
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(palette.text).bg(palette.background)),
+        area,
+    );
+}
 fn model_filter_status(app: &App, language: Language) -> String {
     let scope = match (app.model_time_range(), language) {
         (ModelTimeRange::All, Language::English) => "All history".to_owned(),
@@ -613,23 +707,22 @@ fn render_plan_list(
     }
     let copy = language.copy();
     if app.plans().is_empty() {
+        let (title, hint) = if app.discovery_entries().is_none() {
+            (copy.discovery_scanning, copy.discovery_hint)
+        } else {
+            (copy.no_plans, copy.no_plans_hint)
+        };
         render_line(
             frame,
             row(area, 0),
-            vec![Span::styled(
-                copy.no_plans,
-                Style::default().fg(palette.muted),
-            )],
+            vec![Span::styled(title, Style::default().fg(palette.muted))],
             palette.background,
         );
         if area.height > 1 {
             render_line(
                 frame,
                 row(area, 1),
-                vec![Span::styled(
-                    copy.no_plans_hint,
-                    Style::default().fg(palette.muted),
-                )],
+                vec![Span::styled(hint, Style::default().fg(palette.muted))],
                 palette.background,
             );
         }
